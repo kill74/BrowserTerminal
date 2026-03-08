@@ -1,6 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Terminal as TerminalIcon } from 'lucide-react';
 
+// ============================================================================
+// TYPES & CONSTANTS
+// ============================================================================
+
 type HistoryItem = {
   id: string;
   type: 'command' | 'text' | 'html' | 'iframe' | 'error';
@@ -8,24 +12,50 @@ type HistoryItem = {
   url?: string;
 };
 
+const HELP_TEXT = `Available commands:
+  help          - Show this help message
+  clear         - Clear the terminal
+  search <q>    - Search the web (uses DuckDuckGo Lite)
+  browse <url>  - Open a website in an iframe (auto-searches if not a URL)
+  curl <url>    - Fetch raw HTML of a website
+  echo <text>   - Print text
+  date          - Show current date/time
+  
+Note: Clicking links inside the browser will automatically run a new browse command!`;
+
+const INITIAL_HISTORY: HistoryItem[] = [
+  { id: '1', type: 'text', content: 'Welcome to WebTerm v2.0.0' },
+  { id: '2', type: 'text', content: 'Type "help" for a list of commands.' },
+];
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
 export default function App() {
-  const [history, setHistory] = useState<HistoryItem[]>([
-    { id: '1', type: 'text', content: 'Welcome to WebTerm v2.0.0' },
-    { id: '2', type: 'text', content: 'Type "help" for a list of commands.' },
-  ]);
+  // --- State ---
+  const [history, setHistory] = useState<HistoryItem[]>(INITIAL_HISTORY);
   const [input, setInput] = useState('');
+  
+  // Command history for up/down arrow navigation
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
 
+  // --- Refs ---
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // --- Effects ---
+  
+  // Auto-scroll to bottom when history changes
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [history]);
 
+  // Listen for messages from the iframe proxy (e.g., when a user clicks a link)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
+      // If the iframe sends a 'navigate' message, automatically run the browse command
       if (event.data && event.data.type === 'navigate' && event.data.url) {
         handleCommand(`browse ${event.data.url}`);
       }
@@ -34,158 +64,212 @@ export default function App() {
     return () => window.removeEventListener('message', handleMessage);
   }, [history, commandHistory, historyIndex]);
 
+  // --- Helpers ---
+
+  // Helper to add a new item to the terminal history
+  const appendToHistory = (item: Omit<HistoryItem, 'id'>) => {
+    setHistory(prev => [...prev, { ...item, id: Date.now().toString() + Math.random().toString(36).substring(7) }]);
+  };
+
+  // Helper to format YouTube URLs into embed URLs so they play nicely in iframes
+  const formatYouTubeUrl = (url: string): { url: string; isEmbed: boolean } => {
+    if (url.includes('youtube.com/watch') || url.includes('youtu.be/')) {
+      try {
+        const videoId = url.includes('youtu.be/') 
+          ? url.split('youtu.be/')[1].split('?')[0]
+          : new URLSearchParams(url.split('?')[1]).get('v');
+          
+        if (videoId) {
+          return { url: `https://www.youtube.com/embed/${videoId}?autoplay=1`, isEmbed: true };
+        }
+      } catch (e) {
+        // Ignore parsing errors and fall through
+      }
+    }
+    return { url, isEmbed: false };
+  };
+
+  // --- Command Execution ---
+
   const handleCommand = async (cmd: string) => {
     const trimmed = cmd.trim();
     if (!trimmed) return;
 
+    // 1. Update command history for arrow key navigation
     setCommandHistory(prev => [...prev, trimmed]);
     setHistoryIndex(-1);
 
-    const newHistory = [...history, { id: Date.now().toString(), type: 'command', content: trimmed } as HistoryItem];
-    setHistory(newHistory);
+    // 2. Echo the command to the screen
+    appendToHistory({ type: 'command', content: trimmed });
     setInput('');
 
+    // 3. Parse the command
     const parts = trimmed.split(' ');
     const command = parts[0].toLowerCase();
     const args = parts.slice(1);
 
+    // 4. Execute the command
     switch (command) {
       case 'help':
-        setHistory(prev => [...prev, {
-          id: Date.now().toString() + 'h',
-          type: 'text',
-          content: `Available commands:
-  help          - Show this help message
-  clear         - Clear the terminal
-  search <q>    - Search the web
-  browse <url>  - Open a website in an iframe (auto-searches if not a URL)
-  curl <url>    - Fetch raw HTML of a website
-  echo <text>   - Print text
-  date          - Show current date/time
-  
-Note: Clicking links inside the browser will automatically run a new browse command!`
-        }]);
+        appendToHistory({ type: 'text', content: HELP_TEXT });
         break;
+        
       case 'clear':
         setHistory([]);
         break;
+        
       case 'echo':
-        setHistory(prev => [...prev, {
-          id: Date.now().toString() + 'e',
-          type: 'text',
-          content: args.join(' ')
-        }]);
+        appendToHistory({ type: 'text', content: args.join(' ') });
         break;
+        
       case 'date':
-        setHistory(prev => [...prev, {
-          id: Date.now().toString() + 'd',
-          type: 'text',
-          content: new Date().toString()
-        }]);
+        appendToHistory({ type: 'text', content: new Date().toString() });
         break;
+        
       case 'search':
       case 'browse': {
         if (!args[0]) {
-          setHistory(prev => [...prev, { id: Date.now().toString() + 'err', type: 'error', content: `Usage: ${command} <url or query>` }]);
+          appendToHistory({ type: 'error', content: `Usage: ${command} <url or query>` });
           break;
         }
-        let query = args.join(' ');
-        let url = query;
         
-        if (command === 'search' || (!url.includes('.') || url.includes(' '))) {
-          url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-        } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
-          url = 'https://' + url;
+        let query = args.join(' ');
+        let targetUrl = query;
+        
+        // Determine if it's a search query or a direct URL
+        const isSearch = command === 'search' || (!targetUrl.includes('.') || targetUrl.includes(' '));
+        
+        if (isSearch) {
+          // Use DuckDuckGo Lite for searches as it works well without JS and avoids CAPTCHAs
+          targetUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+        } else if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+          // Auto-prepend https:// if missing
+          targetUrl = 'https://' + targetUrl;
         }
 
-        // YouTube video detection to use embed player for better iframe support
-        let isDirectEmbed = false;
-        if (url.includes('youtube.com/watch') || url.includes('youtu.be/')) {
-          try {
-            const videoId = url.includes('youtu.be/') 
-              ? url.split('youtu.be/')[1].split('?')[0]
-              : new URLSearchParams(url.split('?')[1]).get('v');
-            if (videoId) {
-              url = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
-              isDirectEmbed = true;
-            }
-          } catch (e) {
-            // Ignore parsing errors
-          }
-        }
+        // Check if it's a YouTube link and convert to embed if so
+        const { url: finalUrl, isEmbed } = formatYouTubeUrl(targetUrl);
 
-        setHistory(prev => [...prev, {
-          id: Date.now().toString() + 'b',
+        // Render the iframe
+        appendToHistory({
           type: 'iframe',
           content: 'Loading...',
-          url: isDirectEmbed ? url : `/api/iframe-proxy?url=${encodeURIComponent(url)}`
-        }]);
+          // If it's a direct embed (like YouTube), load it directly. 
+          // Otherwise, route it through our proxy to bypass security restrictions.
+          url: isEmbed ? finalUrl : `/api/iframe-proxy?url=${encodeURIComponent(finalUrl)}`
+        });
         break;
       }
+      
       case 'curl': {
         if (!args[0]) {
-          setHistory(prev => [...prev, { id: Date.now().toString() + 'err', type: 'error', content: 'Usage: curl <url>' }]);
+          appendToHistory({ type: 'error', content: 'Usage: curl <url>' });
           break;
         }
-        let url = args[0];
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-          url = 'https://' + url;
+        
+        let targetUrl = args[0];
+        if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+          targetUrl = 'https://' + targetUrl;
         }
+        
         try {
-          const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`);
+          const res = await fetch(`/api/proxy?url=${encodeURIComponent(targetUrl)}`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          
           const text = await res.text();
-          setHistory(prev => [...prev, {
-            id: Date.now().toString() + 'c',
-            type: 'text',
-            content: text.slice(0, 2000) + (text.length > 2000 ? '\n...[truncated]' : '')
-          }]);
+          // Truncate output if it's too long so we don't crash the browser
+          const output = text.slice(0, 2000) + (text.length > 2000 ? '\n...[truncated]' : '');
+          
+          appendToHistory({ type: 'text', content: output });
         } catch (err: any) {
-          setHistory(prev => [...prev, { id: Date.now().toString() + 'err', type: 'error', content: `Error: ${err.message}` }]);
+          appendToHistory({ type: 'error', content: `Error: ${err.message}` });
         }
         break;
       }
+      
       default:
-        setHistory(prev => [...prev, {
-          id: Date.now().toString() + 'err',
-          type: 'error',
-          content: `Command not found: ${command}`
-        }]);
+        appendToHistory({ type: 'error', content: `Command not found: ${command}` });
     }
   };
 
+  // --- Keyboard Navigation ---
+  
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleCommand(input);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (commandHistory.length > 0) {
+        const nextIndex = historyIndex + 1 < commandHistory.length ? historyIndex + 1 : historyIndex;
+        setHistoryIndex(nextIndex);
+        setInput(commandHistory[commandHistory.length - 1 - nextIndex]);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIndex > 0) {
+        const nextIndex = historyIndex - 1;
+        setHistoryIndex(nextIndex);
+        setInput(commandHistory[commandHistory.length - 1 - nextIndex]);
+      } else if (historyIndex === 0) {
+        setHistoryIndex(-1);
+        setInput('');
+      }
+    }
+  };
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
+
   return (
-    <div className="min-h-screen bg-black text-green-500 p-4 font-mono text-sm sm:text-base flex flex-col" onClick={() => inputRef.current?.focus()}>
+    <div 
+      className="min-h-screen bg-black text-green-500 p-4 font-mono text-sm sm:text-base flex flex-col" 
+      onClick={() => inputRef.current?.focus()}
+    >
+      {/* Header */}
       <div className="flex items-center gap-2 mb-4 text-green-400 border-b border-green-900 pb-2">
         <TerminalIcon size={20} />
         <h1 className="font-bold tracking-wider">WEB-TERM</h1>
       </div>
       
+      {/* Terminal Output Area */}
       <div className="flex-1 overflow-y-auto space-y-2 pb-4">
         {history.map((item) => (
           <div key={item.id} className="break-words">
+            
+            {/* Command Echo */}
             {item.type === 'command' && (
               <div className="flex">
                 <span className="text-blue-400 mr-2">user@web-term:~$</span>
                 <span className="text-white">{item.content}</span>
               </div>
             )}
+            
+            {/* Standard Text Output */}
             {item.type === 'text' && (
               <pre className="whitespace-pre-wrap text-green-300 font-mono">{item.content}</pre>
             )}
+            
+            {/* Error Output */}
             {item.type === 'error' && (
               <div className="text-red-400">{item.content}</div>
             )}
+            
+            {/* Iframe Browser Output */}
             {item.type === 'iframe' && (
               <div className="mt-2 border border-green-800 rounded overflow-hidden bg-white w-full max-w-5xl h-[70vh]">
+                {/* Fake Browser Chrome */}
                 <div className="bg-gray-200 text-black px-2 py-1 text-xs border-b border-gray-300 flex items-center justify-between">
-                  <span className="truncate">{decodeURIComponent(item.url?.replace('/api/iframe-proxy?url=', '') || '')}</span>
+                  <span className="truncate">
+                    {decodeURIComponent(item.url?.replace('/api/iframe-proxy?url=', '') || '')}
+                  </span>
                   <div className="flex gap-1">
                     <div className="w-3 h-3 rounded-full bg-red-500"></div>
                     <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
                     <div className="w-3 h-3 rounded-full bg-green-500"></div>
                   </div>
                 </div>
+                {/* Actual Iframe */}
                 <iframe 
                   src={item.url} 
                   className="w-full h-full border-none bg-white" 
@@ -195,11 +279,14 @@ Note: Clicking links inside the browser will automatically run a new browse comm
                 />
               </div>
             )}
+            
           </div>
         ))}
+        {/* Invisible element to scroll to */}
         <div ref={bottomRef} />
       </div>
 
+      {/* Input Area */}
       <div className="flex mt-2 items-center">
         <span className="text-blue-400 mr-2">user@web-term:~$</span>
         <input
@@ -207,28 +294,7 @@ Note: Clicking links inside the browser will automatically run a new browse comm
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              handleCommand(input);
-            } else if (e.key === 'ArrowUp') {
-              e.preventDefault();
-              if (commandHistory.length > 0) {
-                const nextIndex = historyIndex + 1 < commandHistory.length ? historyIndex + 1 : historyIndex;
-                setHistoryIndex(nextIndex);
-                setInput(commandHistory[commandHistory.length - 1 - nextIndex]);
-              }
-            } else if (e.key === 'ArrowDown') {
-              e.preventDefault();
-              if (historyIndex > 0) {
-                const nextIndex = historyIndex - 1;
-                setHistoryIndex(nextIndex);
-                setInput(commandHistory[commandHistory.length - 1 - nextIndex]);
-              } else if (historyIndex === 0) {
-                setHistoryIndex(-1);
-                setInput('');
-              }
-            }
-          }}
+          onKeyDown={handleKeyDown}
           className="flex-1 bg-transparent border-none outline-none text-white caret-green-500"
           autoFocus
           spellCheck={false}

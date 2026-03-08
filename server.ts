@@ -7,18 +7,27 @@ async function startServer() {
 
   app.use(express.json());
 
+  // ============================================================================
+  // API ROUTES
+  // ============================================================================
+
+  // 1. Basic Proxy (used for the 'curl' command)
+  // This simply fetches a URL and returns the raw text.
   app.get("/api/proxy", async (req, res) => {
-    const urlStr = req.query.url as string;
-    if (!urlStr) {
-      return res.status(400).json({ error: "Missing URL" });
+    const targetUrl = req.query.url as string;
+    
+    if (!targetUrl) {
+      return res.status(400).json({ error: "Missing URL parameter" });
     }
     
     try {
-      const response = await fetch(urlStr, {
+      const response = await fetch(targetUrl, {
         headers: {
+          // Pretend to be a normal browser so websites don't block us
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
       });
+      
       const text = await response.text();
       res.send(text);
     } catch (error: any) {
@@ -26,114 +35,165 @@ async function startServer() {
     }
   });
 
+  // 2. Iframe Proxy (used for the 'browse' and 'search' commands)
+  // This is the magic that allows us to embed websites inside our terminal.
+  // It fetches the website, strips out security headers that block iframes,
+  // and injects custom scripts to handle navigation.
   app.get("/api/iframe-proxy", async (req, res) => {
-    const urlStr = req.query.url as string;
-    console.log(`[PROXY] Request for: ${urlStr}`);
-    if (!urlStr) {
-      return res.status(400).send("Missing URL");
+    const targetUrl = req.query.url as string;
+    
+    console.log(`[PROXY] Request for: ${targetUrl}`);
+    
+    if (!targetUrl) {
+      return res.status(400).send("Missing URL parameter");
     }
     
     try {
-      const url = new URL(urlStr);
+      const url = new URL(targetUrl);
+      
+      // Fetch the website content
       const response = await fetch(url.toString(), {
         headers: {
+          // Use a very standard browser user-agent
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.5"
         }
       });
       
-      console.log(`[PROXY] Fetched ${urlStr} - Status: ${response.status}`);
+      console.log(`[PROXY] Fetched ${targetUrl} - Status: ${response.status}`);
       
-      const contentType = response.headers.get("content-type") || "";
-      
+      // --- Header Modification ---
+      // We need to remove headers that prevent the site from loading in an iframe
       const headers = new Headers(response.headers);
+      
+      // Remove security headers that block embedding
       headers.delete("x-frame-options");
       headers.delete("content-security-policy");
       headers.delete("cross-origin-opener-policy");
       headers.delete("cross-origin-embedder-policy");
+      
+      // Remove encoding headers because we are going to modify the HTML text
+      // If we leave these, the browser will try to decompress our modified text and fail
       headers.delete("content-encoding");
       headers.delete("content-length");
       headers.delete("transfer-encoding");
       
+      // Forward the modified headers to the client
       res.status(response.status);
       headers.forEach((value, key) => {
         res.setHeader(key, value);
       });
       
+      const contentType = response.headers.get("content-type") || "";
+      
+      // If it's an HTML page, we need to modify it
       if (contentType.includes("text/html")) {
         let html = await response.text();
         
-        // Strip all script tags to prevent frame-busting and JS errors
+        // --- HTML Sanitization ---
+        
+        // 1. Strip all <script> tags. 
+        // Why? Many sites have "frame-busting" scripts that detect if they are in an iframe
+        // and force the parent window to redirect. Removing scripts prevents this.
         html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
         
-        // Strip meta refresh to prevent breaking out of the proxy
+        // 2. Strip meta refresh tags.
+        // Why? Prevents the page from automatically redirecting us away.
         html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, '');
         
-        // Strip CSP meta tags
+        // 3. Strip Content-Security-Policy meta tags.
+        // Why? Same reason as the HTTP headers, they can block our injected scripts.
         html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, '');
         
-        const finalUrl = new URL(response.url);
-        const baseTag = `<base href="${finalUrl.origin}${finalUrl.pathname}">
-<style>
-  html, body {
-    display: block !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-  }
-</style>`;
+        // --- HTML Injection ---
         
-        const scriptInjection = `
-<script>
-  document.addEventListener('click', function(e) {
-    const a = e.target.closest('a');
-    if (a && a.href && !a.href.startsWith('javascript:')) {
-      e.preventDefault();
-      e.stopPropagation();
-      window.parent.postMessage({ type: 'navigate', url: a.href }, '*');
-    }
-  }, true);
-  document.addEventListener('submit', function(e) {
-    const form = e.target.closest('form');
-    if (form && form.method.toUpperCase() === 'GET') {
-      e.preventDefault();
-      e.stopPropagation();
-      const formData = new FormData(form);
-      const params = new URLSearchParams();
-      for (const pair of formData.entries()) {
-        params.append(pair[0], pair[1]);
-      }
-      const url = new URL(form.action || window.location.href);
-      const existingParams = new URLSearchParams(url.search);
-      for (const pair of params.entries()) {
-        existingParams.set(pair[0], pair[1]);
-      }
-      url.search = existingParams.toString();
-      window.parent.postMessage({ type: 'navigate', url: url.toString() }, '*');
-    }
-  }, true);
-</script>
-`;
+        const finalUrl = new URL(response.url);
+        
+        // We inject a <base> tag so that relative links (like "/about") resolve correctly
+        // We also inject CSS to force the body to be visible, overriding any frame-busting CSS
+        const headInjection = `
+          <base href="${finalUrl.origin}${finalUrl.pathname}">
+          <style>
+            html, body {
+              display: block !important;
+              visibility: visible !important;
+              opacity: 1 !important;
+            }
+          </style>
+        `;
+        
+        // We inject a script to intercept clicks and form submissions.
+        // Instead of letting the iframe navigate (which often breaks), we send a message
+        // to our React app, which then runs a new 'browse' command for the new URL.
+        const bodyInjection = `
+          <script>
+            // Intercept link clicks
+            document.addEventListener('click', function(e) {
+              const a = e.target.closest('a');
+              if (a && a.href && !a.href.startsWith('javascript:')) {
+                e.preventDefault();
+                e.stopPropagation();
+                window.parent.postMessage({ type: 'navigate', url: a.href }, '*');
+              }
+            }, true);
+            
+            // Intercept form submissions (like search bars)
+            document.addEventListener('submit', function(e) {
+              const form = e.target.closest('form');
+              if (form && form.method.toUpperCase() === 'GET') {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                // Build the new URL with the form data
+                const formData = new FormData(form);
+                const params = new URLSearchParams();
+                for (const pair of formData.entries()) {
+                  params.append(pair[0], pair[1]);
+                }
+                
+                const url = new URL(form.action || window.location.href);
+                const existingParams = new URLSearchParams(url.search);
+                for (const pair of params.entries()) {
+                  existingParams.set(pair[0], pair[1]);
+                }
+                url.search = existingParams.toString();
+                
+                // Tell the React app to navigate
+                window.parent.postMessage({ type: 'navigate', url: url.toString() }, '*');
+              }
+            }, true);
+          </script>
+        `;
+        
+        // Insert our injections into the HTML
         if (html.includes("<head>")) {
-          html = html.replace("<head>", `<head>\n${baseTag}`);
+          html = html.replace("<head>", `<head>\n${headInjection}`);
         } else {
-          html = `${baseTag}\n${html}`;
+          html = `${headInjection}\n${html}`;
         }
         
         if (html.includes("</body>")) {
-          html = html.replace("</body>", `${scriptInjection}\n</body>`);
+          html = html.replace("</body>", `${bodyInjection}\n</body>`);
         } else {
-          html = `${html}\n${scriptInjection}`;
+          html = `${html}\n${bodyInjection}`;
         }
+        
         res.send(html);
       } else {
+        // If it's not HTML (e.g., an image, CSS, or JSON), just send the raw data
         const buffer = await response.arrayBuffer();
         res.send(Buffer.from(buffer));
       }
     } catch (error: any) {
+      console.error(`[PROXY ERROR] ${error.message}`);
       res.status(500).send(`Error loading iframe: ${error.message}`);
     }
   });
+
+  // ============================================================================
+  // VITE SETUP (Frontend)
+  // ============================================================================
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
