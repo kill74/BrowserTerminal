@@ -7,19 +7,21 @@ import { Terminal as TerminalIcon } from 'lucide-react';
 
 type HistoryItem = {
   id: string;
-  type: 'command' | 'text' | 'html' | 'iframe' | 'error';
+  type: 'command' | 'text' | 'html' | 'iframe' | 'error' | 'ai';
   content: string;
   url?: string;
 };
 
 const HELP_TEXT = `Available commands:
   help          - Show this help message
-  clear         - Clear the terminal
+  clear         - Clear the terminal (also resets AI memory)
   search <q>    - Search the web (uses DuckDuckGo Lite)
   browse <url>  - Open a website in an iframe (auto-searches if not a URL)
   curl <url>    - Fetch raw HTML of a website
   echo <text>   - Print text
   date          - Show current date/time
+  ai <message>  - Chat with your local Ollama AI (remembers the conversation!)
+  ai reset      - Wipe the AI conversation memory and start fresh
   
 Note: Clicking links inside the browser will automatically run a new browse command!`;
 
@@ -40,6 +42,9 @@ export default function App() {
   // Command history for up/down arrow navigation
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
+
+  // Ollama conversation memory — keeps the full chat so the AI has context
+  const [aiMessages, setAiMessages] = useState<{ role: string; content: string }[]>([]);
 
   // --- Refs ---
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -116,6 +121,7 @@ export default function App() {
         
       case 'clear':
         setHistory([]);
+        setAiMessages([]); // also wipe AI memory when the screen is cleared
         break;
         
       case 'echo':
@@ -187,6 +193,77 @@ export default function App() {
         break;
       }
       
+      case 'ai': {
+        const userMessage = args.join(' ').trim();
+
+        // Special sub-command: reset the conversation memory
+        if (userMessage.toLowerCase() === 'reset') {
+          setAiMessages([]);
+          appendToHistory({ type: 'text', content: '🧠 AI memory cleared. Starting a fresh conversation.' });
+          break;
+        }
+
+        if (!userMessage) {
+          appendToHistory({ type: 'error', content: 'Usage: ai <your message>  |  ai reset' });
+          break;
+        }
+
+        // Show a "thinking" indicator while we wait for Ollama
+        appendToHistory({ type: 'ai', content: '🤖 Thinking...' });
+
+        // Build the updated messages list with the user's new message appended
+        const updatedMessages = [...aiMessages, { role: 'user', content: userMessage }];
+
+        try {
+          const res = await fetch('/api/ai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: updatedMessages }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            // Replace the "Thinking..." placeholder with the error
+            setHistory(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
+                copy[copy.length - 1] = { ...last, type: 'error', content: `AI error: ${data.error}` };
+              }
+              return copy;
+            });
+            break;
+          }
+
+          const reply = data.reply as string;
+
+          // Save the full exchange into memory so the next message has context
+          setAiMessages([...updatedMessages, { role: 'assistant', content: reply }]);
+
+          // Replace the "Thinking..." placeholder with the real reply
+          setHistory(prev => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
+              copy[copy.length - 1] = { ...last, content: `🤖 ${reply}` };
+            }
+            return copy;
+          });
+
+        } catch (err: any) {
+          setHistory(prev => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
+              copy[copy.length - 1] = { ...last, type: 'error', content: `Could not reach Ollama: ${err.message}` };
+            }
+            return copy;
+          });
+        }
+        break;
+      }
+
       default:
         appendToHistory({ type: 'error', content: `Command not found: ${command}` });
     }
@@ -253,6 +330,11 @@ export default function App() {
             {/* Error Output */}
             {item.type === 'error' && (
               <div className="text-red-400">{item.content}</div>
+            )}
+            
+            {/* AI Response Output */}
+            {item.type === 'ai' && (
+              <pre className="whitespace-pre-wrap text-purple-300 font-mono">{item.content}</pre>
             )}
             
             {/* Iframe Browser Output */}
