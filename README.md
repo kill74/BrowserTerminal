@@ -51,7 +51,7 @@ Aqui tens a lista de tudo o que podes fazer:
 
 ---
 
-## 🛰️ A Barra de Estado (Status Bar)
+## A Barra de Estado (Status Bar)
 
 Na parte inferior, tens sempre informações em tempo real:
 *   **DIR**: A pasta onde "estás".
