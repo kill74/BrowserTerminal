@@ -7,21 +7,19 @@ import { Terminal as TerminalIcon } from 'lucide-react';
 
 type HistoryItem = {
   id: string;
-  type: 'command' | 'text' | 'html' | 'iframe' | 'error' | 'ai';
+  type: 'command' | 'text' | 'html' | 'iframe' | 'error';
   content: string;
   url?: string;
 };
 
 const HELP_TEXT = `Available commands:
   help          - Show this help message
-  clear         - Clear the terminal (also resets AI memory)
+  clear         - Clear the terminal
   search <q>    - Search the web (uses DuckDuckGo Lite)
   browse <url>  - Open a website in an iframe (auto-searches if not a URL)
   curl <url>    - Fetch raw HTML of a website
   echo <text>   - Print text
   date          - Show current date/time
-  ai <message>  - Chat with your local Ollama AI (remembers the conversation!)
-  ai reset      - Wipe the AI conversation memory and start fresh
   
 Note: Clicking links inside the browser will automatically run a new browse command!`;
 
@@ -43,9 +41,6 @@ export default function App() {
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
 
-  // Ollama conversation memory — keeps the full chat so the AI has context
-  const [aiMessages, setAiMessages] = useState<{ role: string; content: string }[]>([]);
-
   // --- Refs ---
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -56,18 +51,6 @@ export default function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [history]);
-
-  // Listen for messages from the iframe proxy (e.g., when a user clicks a link)
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      // If the iframe sends a 'navigate' message, automatically run the browse command
-      if (event.data && event.data.type === 'navigate' && event.data.url) {
-        handleCommand(`browse ${event.data.url}`);
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [history, commandHistory, historyIndex]);
 
   // --- Helpers ---
 
@@ -96,7 +79,7 @@ export default function App() {
 
   // --- Command Execution ---
 
-  const handleCommand = async (cmd: string) => {
+  const handleCommand = React.useCallback(async (cmd: string) => {
     const trimmed = cmd.trim();
     if (!trimmed) return;
 
@@ -121,7 +104,6 @@ export default function App() {
         
       case 'clear':
         setHistory([]);
-        setAiMessages([]); // also wipe AI memory when the screen is cleared
         break;
         
       case 'echo':
@@ -156,13 +138,24 @@ export default function App() {
         // Check if it's a YouTube link and convert to embed if so
         const { url: finalUrl, isEmbed } = formatYouTubeUrl(targetUrl);
 
+        // Special handling for YouTube homepage which requires JS
+        if (finalUrl.toLowerCase().includes('youtube.com') && !isEmbed && !finalUrl.includes('search')) {
+          appendToHistory({ 
+            type: 'text', 
+            content: '💡 [SYSTEM] The full YouTube homepage requires JavaScript. Redirecting to search results...' 
+          });
+          targetUrl = `https://lite.duckduckgo.com/lite/?q=site:youtube.com+${encodeURIComponent(query.replace('youtube.com', '').trim() || 'trending')}`;
+        } else {
+          targetUrl = finalUrl;
+        }
+
         // Render the iframe
         appendToHistory({
           type: 'iframe',
           content: 'Loading...',
           // If it's a direct embed (like YouTube), load it directly. 
           // Otherwise, route it through our proxy to bypass security restrictions.
-          url: isEmbed ? finalUrl : `/api/iframe-proxy?url=${encodeURIComponent(finalUrl)}`
+          url: isEmbed ? targetUrl : `/api/iframe-proxy?url=${encodeURIComponent(targetUrl)}`
         });
         break;
       }
@@ -180,94 +173,40 @@ export default function App() {
         
         try {
           const res = await fetch(`/api/proxy?url=${encodeURIComponent(targetUrl)}`);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
           
-          const text = await res.text();
+          if (!res.ok) {
+            appendToHistory({ type: 'error', content: `Fetch Error: ${data.error || res.statusText}` });
+            return;
+          }
+          
           // Truncate output if it's too long so we don't crash the browser
-          const output = text.slice(0, 2000) + (text.length > 2000 ? '\n...[truncated]' : '');
+          const content = data.content || '';
+          const output = content.slice(0, 2000) + (content.length > 2000 ? '\n...[truncated]' : '');
           
           appendToHistory({ type: 'text', content: output });
         } catch (err: any) {
-          appendToHistory({ type: 'error', content: `Error: ${err.message}` });
+          appendToHistory({ type: 'error', content: `Terminal Error: ${err.message}` });
         }
         break;
       }
       
-      case 'ai': {
-        const userMessage = args.join(' ').trim();
-
-        // Special sub-command: reset the conversation memory
-        if (userMessage.toLowerCase() === 'reset') {
-          setAiMessages([]);
-          appendToHistory({ type: 'text', content: '🧠 AI memory cleared. Starting a fresh conversation.' });
-          break;
-        }
-
-        if (!userMessage) {
-          appendToHistory({ type: 'error', content: 'Usage: ai <your message>  |  ai reset' });
-          break;
-        }
-
-        // Show a "thinking" indicator while we wait for Ollama
-        appendToHistory({ type: 'ai', content: '🤖 Thinking...' });
-
-        // Build the updated messages list with the user's new message appended
-        const updatedMessages = [...aiMessages, { role: 'user', content: userMessage }];
-
-        try {
-          const res = await fetch('/api/ai', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: updatedMessages }),
-          });
-
-          const data = await res.json();
-
-          if (!res.ok) {
-            // Replace the "Thinking..." placeholder with the error
-            setHistory(prev => {
-              const copy = [...prev];
-              const last = copy[copy.length - 1];
-              if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
-                copy[copy.length - 1] = { ...last, type: 'error', content: `AI error: ${data.error}` };
-              }
-              return copy;
-            });
-            break;
-          }
-
-          const reply = data.reply as string;
-
-          // Save the full exchange into memory so the next message has context
-          setAiMessages([...updatedMessages, { role: 'assistant', content: reply }]);
-
-          // Replace the "Thinking..." placeholder with the real reply
-          setHistory(prev => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
-              copy[copy.length - 1] = { ...last, content: `🤖 ${reply}` };
-            }
-            return copy;
-          });
-
-        } catch (err: any) {
-          setHistory(prev => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last?.type === 'ai' && last.content === '🤖 Thinking...') {
-              copy[copy.length - 1] = { ...last, type: 'error', content: `Could not reach Ollama: ${err.message}` };
-            }
-            return copy;
-          });
-        }
-        break;
-      }
-
       default:
         appendToHistory({ type: 'error', content: `Command not found: ${command}` });
     }
-  };
+  }, [commandHistory, historyIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Listen for messages from the iframe proxy (e.g., when a user clicks a link)
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      // If the iframe sends a 'navigate' message, automatically run the browse command
+      if (event.data && event.data.type === 'navigate' && event.data.url) {
+        handleCommand(`browse ${event.data.url}`);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [handleCommand]);
 
   // --- Keyboard Navigation ---
   
@@ -324,7 +263,7 @@ export default function App() {
             
             {/* Standard Text Output */}
             {item.type === 'text' && (
-              <pre className="whitespace-pre-wrap text-green-300 font-mono">{item.content}</pre>
+              <pre className="whitespace-pre-wrap text-green-300 font-mono m-0 p-0">{item.content}</pre>
             )}
             
             {/* Error Output */}
@@ -332,23 +271,18 @@ export default function App() {
               <div className="text-red-400">{item.content}</div>
             )}
             
-            {/* AI Response Output */}
-            {item.type === 'ai' && (
-              <pre className="whitespace-pre-wrap text-purple-300 font-mono">{item.content}</pre>
-            )}
-            
             {/* Iframe Browser Output */}
             {item.type === 'iframe' && (
-              <div className="mt-2 border border-green-800 rounded overflow-hidden bg-white w-full max-w-5xl h-[70vh]">
+              <div className="mt-2 border border-green-800 rounded overflow-hidden bg-white w-full max-w-5xl h-[60vh] sm:h-[70vh] relative">
                 {/* Fake Browser Chrome */}
-                <div className="bg-gray-200 text-black px-2 py-1 text-xs border-b border-gray-300 flex items-center justify-between">
-                  <span className="truncate">
+                <div className="bg-gray-200 text-black px-2 py-1 text-xs border-b border-gray-300 flex items-center justify-between sticky top-0 z-10">
+                  <span className="truncate pr-4">
                     {decodeURIComponent(item.url?.replace('/api/iframe-proxy?url=', '') || '')}
                   </span>
-                  <div className="flex gap-1">
-                    <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                    <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-                    <div className="w-3 h-3 rounded-full bg-green-500"></div>
+                  <div className="flex gap-1 flex-shrink-0">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-500"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
                   </div>
                 </div>
                 {/* Actual Iframe */}
@@ -358,6 +292,7 @@ export default function App() {
                   sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-presentation allow-downloads"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
                   allowFullScreen
+                  title="Web Browser"
                 />
               </div>
             )}

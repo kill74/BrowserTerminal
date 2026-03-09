@@ -1,10 +1,5 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import dotenv from "dotenv";
-
-// Load .env.local first, then fall back to .env
-dotenv.config({ path: ".env.local" });
-dotenv.config();
 
 async function startServer() {
   const app = express();
@@ -33,10 +28,18 @@ async function startServer() {
         }
       });
       
+      if (!response.ok) {
+        return res.status(response.status).json({ 
+          error: `Failed to fetch: ${response.status} ${response.statusText}`,
+          status: response.status 
+        });
+      }
+      
       const text = await response.text();
-      res.send(text);
+      res.json({ content: text });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      console.error(`[PROXY ERROR] ${error.message}`);
+      res.status(500).json({ error: `Connection error: ${error.message}` });
     }
   });
 
@@ -67,6 +70,19 @@ async function startServer() {
       });
       
       console.log(`[PROXY] Fetched ${targetUrl} - Status: ${response.status}`);
+
+      if (!response.ok) {
+        // Return a custom HTML error page for the iframe
+        res.status(response.status).send(`
+          <div style="font-family: sans-serif; padding: 20px; color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
+            <h3 style="margin-top: 0;">Failed to load website</h3>
+            <p><strong>URL:</strong> ${targetUrl}</p>
+            <p><strong>Status:</strong> ${response.status} ${response.statusText}</p>
+            <p>The website might be blocking proxy requests or is currently unavailable.</p>
+          </div>
+        `);
+        return;
+      }
       
       // --- Header Modification ---
       // We need to remove headers that prevent the site from loading in an iframe
@@ -192,66 +208,14 @@ async function startServer() {
       }
     } catch (error: any) {
       console.error(`[PROXY ERROR] ${error.message}`);
-      res.status(500).send(`Error loading iframe: ${error.message}`);
-    }
-  });
-
-  // ============================================================================
-  // 3. Ollama AI Route
-  // ============================================================================
-  // This route talks to your local Ollama instance.
-  // Make sure Ollama is running (ollama serve) before using the 'ai' command.
-  // Configure the model and URL in your .env.local file.
-
-  app.post("/api/ai", async (req, res) => {
-    const { messages } = req.body as { messages: { role: string; content: string }[] };
-
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: "Missing or invalid 'messages' array in request body." });
-    }
-
-    const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
-    const ollamaModel   = process.env.OLLAMA_MODEL   || "llama3";
-
-    console.log(`[OLLAMA] Sending request to ${ollamaBaseUrl} using model: ${ollamaModel}`);
-
-    try {
-      // We use the /api/chat endpoint which supports multi-turn conversations.
-      // Ollama streams responses by default — we set stream:false to get one clean reply.
-      const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: ollamaModel,
-          messages,
-          stream: false,
-        }),
-      });
-
-      if (!ollamaRes.ok) {
-        const errText = await ollamaRes.text();
-        console.error(`[OLLAMA ERROR] Status ${ollamaRes.status}: ${errText}`);
-        return res.status(502).json({
-          error: `Ollama returned an error (HTTP ${ollamaRes.status}). Is Ollama running? Is the model "${ollamaModel}" pulled?`,
-          detail: errText,
-        });
-      }
-
-      const data = await ollamaRes.json() as {
-        message: { role: string; content: string };
-        done: boolean;
-      };
-
-      // Return just the assistant's reply text so the frontend keeps it simple
-      res.json({ reply: data.message?.content ?? "" });
-
-    } catch (error: any) {
-      // This usually means Ollama is not running at all
-      console.error(`[OLLAMA ERROR] ${error.message}`);
-      res.status(503).json({
-        error: "Could not connect to Ollama. Make sure it is running with 'ollama serve'.",
-        detail: error.message,
-      });
+      res.status(500).send(`
+        <div style="font-family: sans-serif; padding: 20px; color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
+          <h3 style="margin-top: 0;">Proxy Connection Error</h3>
+          <p><strong>URL:</strong> ${targetUrl}</p>
+          <p><strong>Error:</strong> ${error.message}</p>
+          <p>Please check if the URL is correct and reachable.</p>
+        </div>
+      `);
     }
   });
 
