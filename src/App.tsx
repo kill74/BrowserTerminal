@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Terminal as TerminalIcon, Shield, Wifi, Cpu, Globe, Search, Play, Download, Settings, Palette, Command, Clock, ChevronRight, Maximize2, X } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Terminal as TerminalIcon } from 'lucide-react';
 
 // ============================================================================
 // TYPES & CONSTANTS
@@ -31,6 +30,9 @@ const HELP_TEXT = `Available commands:
   cd <dir>      - Change directory (simulated)
   echo <text>   - Print text
   date          - Show current date/time
+  ai <prompt>   - Chat with local Ollama (requires Ollama running)
+  ollama <cmd>  - Ollama config (ollama status, ollama model <name>)
+  twitch <name> - Watch a Twitch stream
   
 Note: Clicking links inside the browser will automatically run a new browse command!`;
 
@@ -42,12 +44,11 @@ const PRESET_THEMES: Record<string, string> = {
 };
 
 const INITIAL_HISTORY: HistoryItem[] = [
-  { id: '1', type: 'text', content: 'AETHER-SHELL [Version 4.2.0-LTS]' },
-  { id: '2', type: 'text', content: '(c) 2026 AetherCorp. All rights reserved.' },
-  { id: '3', type: 'text', content: 'Type "help" to initialize command list.' },
+  { id: '1', type: 'text', content: 'Welcome to WebTerm v2.0.0' },
+  { id: '2', type: 'text', content: 'Type "help" for a list of commands.' },
 ];
 
-const COMMANDS = ['help', 'clear', 'search', 'engine', 'browse', 'youtube', 'watch', 'mirror', 'curl', 'download', 'theme', 'css', 'cd', 'echo', 'date'];
+const COMMANDS = ['help', 'clear', 'search', 'engine', 'browse', 'youtube', 'watch', 'mirror', 'curl', 'download', 'theme', 'css', 'cd', 'echo', 'date', 'ai', 'ollama', 'twitch'];
 const THEME_MODES = ['light', 'dark', 'toggle', ...Object.keys(PRESET_THEMES)];
 
 const SEARCH_ENGINES: Record<string, string> = {
@@ -82,6 +83,8 @@ export default function App() {
   const [activeProcesses, setActiveProcesses] = useState<string[]>([]);
   const [ytMirrorIndex, setYtMirrorIndex] = useState(0);
   const [searchEngine, setSearchEngine] = useState('ddg');
+  const [ollamaModel, setOllamaModel] = useState('llama3');
+  const [ollamaHost, setOllamaHost] = useState('http://localhost:11434');
   
   // Reverse search state
   const [isReverseSearch, setIsReverseSearch] = useState(false);
@@ -223,6 +226,97 @@ export default function App() {
       case 'date':
         appendToHistory({ type: 'text', content: new Date().toString() });
         break;
+
+      case 'ai': {
+        const prompt = args.join(' ');
+        if (!prompt) {
+          appendToHistory({ type: 'error', content: 'Usage: ai <prompt>' });
+          break;
+        }
+
+        appendToHistory({ type: 'text', content: `[OLLAMA] Thinking... (Model: ${ollamaModel})` });
+        setActiveProcesses(prev => [...prev, 'AI']);
+
+        try {
+          const response = await fetch(`${ollamaHost}/api/generate`, {
+            method: 'POST',
+            body: JSON.stringify({
+              model: ollamaModel,
+              prompt: prompt,
+              stream: false
+            }),
+            headers: { 'Content-Type': 'application/json' }
+          });
+
+          if (!response.ok) {
+            throw new Error(`Ollama error: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          appendToHistory({ type: 'text', content: data.response });
+        } catch (err: any) {
+          appendToHistory({ 
+            type: 'error', 
+            content: `Ollama Connection Failed: ${err.message}\n\nTroubleshooting:\n1. Ensure Ollama is running locally.\n2. Ensure OLLAMA_ORIGINS="*" is set in your environment variables.\n3. If using HTTPS, browsers may block local HTTP requests. Try running Ollama with a secure tunnel or use Chrome's "Insecure content" site setting.` 
+          });
+        } finally {
+          setActiveProcesses(prev => prev.filter(p => p !== 'AI'));
+        }
+        break;
+      }
+
+      case 'ollama': {
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'status') {
+          try {
+            const res = await fetch(`${ollamaHost}/api/tags`);
+            if (res.ok) {
+              const data = await res.json();
+              appendToHistory({ type: 'text', content: `Ollama is ONLINE at ${ollamaHost}\nAvailable models: ${data.models?.map((m: any) => m.name).join(', ') || 'None'}` });
+            } else {
+              appendToHistory({ type: 'error', content: `Ollama returned status ${res.status}` });
+            }
+          } catch (e: any) {
+            appendToHistory({ type: 'error', content: `Ollama is OFFLINE: ${e.message}` });
+          }
+        } else if (sub === 'model') {
+          if (args[1]) {
+            setOllamaModel(args[1]);
+            appendToHistory({ type: 'text', content: `Ollama model set to: ${args[1]}` });
+          } else {
+            appendToHistory({ type: 'text', content: `Current Ollama model: ${ollamaModel}` });
+          }
+        } else if (sub === 'host') {
+          if (args[1]) {
+            setOllamaHost(args[1]);
+            appendToHistory({ type: 'text', content: `Ollama host set to: ${args[1]}` });
+          } else {
+            appendToHistory({ type: 'text', content: `Current Ollama host: ${ollamaHost}` });
+          }
+        } else {
+          appendToHistory({ type: 'text', content: 'Usage: ollama <status|model|host> [value]' });
+        }
+        break;
+      }
+
+      case 'twitch': {
+        const channel = args[0];
+        if (!channel) {
+          appendToHistory({ type: 'error', content: 'Usage: twitch <channel_name>' });
+          break;
+        }
+        
+        // Twitch requires the 'parent' parameter to match the current domain
+        const parent = window.location.hostname;
+        const twitchUrl = `https://player.twitch.tv/?channel=${channel}&parent=${parent}&autoplay=true`;
+        
+        appendToHistory({
+          type: 'iframe',
+          content: `Loading Twitch stream: ${channel}`,
+          url: twitchUrl
+        });
+        break;
+      }
         
       case 'search':
       case 'youtube':
@@ -442,7 +536,9 @@ export default function App() {
     const handleMessage = (event: MessageEvent) => {
       // If the iframe sends a 'navigate' message, automatically run the browse command
       if (event.data && event.data.type === 'navigate' && event.data.url) {
-        handleCommand(`browse ${event.data.url}`);
+        const url = event.data.url;
+        appendToHistory({ type: 'text', content: `[NAV] Navigating to: ${url}` });
+        handleCommand(`browse ${url}`);
       }
     };
     window.addEventListener('message', handleMessage);
@@ -557,202 +653,160 @@ export default function App() {
   const isDark = theme === 'dark';
 
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-500 ${isDark ? 'bg-[#050505] text-[#00ff9f]' : 'bg-[#f0f0f0] text-[#005f73]'}`}>
+    <div 
+      className={`min-h-screen p-4 font-mono text-sm sm:text-base flex flex-col transition-colors duration-300 ${
+        isDark ? 'bg-black text-green-500' : 'bg-white text-blue-700'
+      }`} 
+      onClick={() => inputRef.current?.focus()}
+    >
       {/* Custom CSS Injection */}
       {customCSS && <style dangerouslySetInnerHTML={{ __html: customCSS }} />}
       
-      {/* Main Container */}
-      <div className="flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto w-full gap-6">
+      {/* Header */}
+      <div className={`flex items-center justify-between mb-4 border-b pb-2 transition-colors duration-300 ${
+        isDark ? 'text-green-400 border-green-900' : 'text-blue-600 border-blue-200'
+      }`}>
+        <div className="flex items-center gap-2">
+          <TerminalIcon size={20} />
+          <h1 className="font-bold tracking-wider">WEB-TERM</h1>
+        </div>
         
-        {/* Top Header / Hardware Bar */}
-        <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 glass-panel p-4 rounded-2xl">
-          <div className="flex items-center gap-4">
-            <div className={`p-3 rounded-xl ${isDark ? 'bg-[#00ff9f]/10 text-[#00ff9f]' : 'bg-[#005f73]/10 text-[#005f73]'}`}>
-              <TerminalIcon size={24} className="animate-pulse" />
-            </div>
-            <div>
-              <h1 className="text-xl font-black tracking-[0.2em] uppercase neon-text">AETHER-SHELL</h1>
-              <div className="flex items-center gap-2 text-[10px] opacity-50 font-mono">
-                <span className="flex items-center gap-1"><Shield size={10} /> SECURE_ENCLAVE</span>
-                <span className="flex items-center gap-1"><Cpu size={10} /> CORE_V4</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
-              className="p-2 rounded-lg glass-panel hover:bg-white/10 transition-colors group"
-              title="Toggle Theme"
-            >
-              <Palette size={18} className="group-hover:rotate-12 transition-transform" />
-            </button>
-            <div className="h-8 w-[1px] bg-white/10 hidden sm:block" />
-            <div className="flex flex-col items-end">
-              <div className="flex items-center gap-2 text-xs font-bold">
-                <Wifi size={12} className={isOnline ? 'text-green-400' : 'text-red-400'} />
-                <span className={isOnline ? 'text-green-400' : 'text-red-400'}>
-                  {isOnline ? 'UPLINK_STABLE' : 'UPLINK_LOST'}
-                </span>
-              </div>
-              <span className="text-[10px] opacity-40 font-mono">NODE_ID: {Math.random().toString(36).substring(7).toUpperCase()}</span>
-            </div>
-          </div>
-        </header>
-
-        {/* Terminal Window */}
-        <main className="flex-1 flex flex-col glass-panel rounded-3xl overflow-hidden relative crt-screen">
-          {/* Window Controls */}
-          <div className="h-10 bg-black/40 border-b border-white/5 flex items-center justify-between px-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-red-500/40" />
-              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/40" />
-              <div className="w-2.5 h-2.5 rounded-full bg-green-500/40" />
-              <span className="ml-2 text-[10px] font-mono opacity-30 uppercase tracking-widest">System_Console</span>
-            </div>
-            <div className="flex items-center gap-4 opacity-30">
-              <Command size={14} />
-              <Maximize2 size={14} />
-            </div>
-          </div>
-
-          {/* Output Area */}
-          <div 
-            className="flex-1 overflow-y-auto p-6 space-y-4 font-mono scroll-smooth"
-            onClick={() => inputRef.current?.focus()}
-          >
-            <AnimatePresence initial={false}>
-              {history.map((item) => (
-                <motion.div 
-                  key={item.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="group"
-                >
-                  {/* Command Echo */}
-                  {item.type === 'command' && (
-                    <div className="flex items-center gap-3 mb-1">
-                      <ChevronRight size={16} className="text-blue-400 opacity-50" />
-                      <span className="text-white/90 font-bold tracking-tight">{item.content}</span>
-                    </div>
-                  )}
-                  
-                  {/* Standard Text Output */}
-                  {item.type === 'text' && (
-                    <pre className="whitespace-pre-wrap opacity-80 leading-relaxed text-sm sm:text-base">
-                      {item.content}
-                    </pre>
-                  )}
-                  
-                  {/* Error Output */}
-                  {item.type === 'error' && (
-                    <div className="flex items-center gap-2 text-red-400/90 bg-red-400/5 p-3 rounded-lg border border-red-400/10 text-sm italic">
-                      <X size={14} />
-                      {item.content}
-                    </div>
-                  )}
-                  
-                  {/* Iframe Browser Output */}
-                  {item.type === 'iframe' && (
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.98, y: 10 }}
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      className="mt-4 glass-panel rounded-2xl overflow-hidden w-full max-w-6xl h-[65vh] relative shadow-2xl shadow-black/50"
-                    >
-                      {/* Browser Chrome */}
-                      <div className="bg-black/80 backdrop-blur-xl px-4 py-2 border-b border-white/10 flex items-center justify-between">
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
-                          <Globe size={14} className="text-blue-400" />
-                          <span className="text-[10px] font-mono opacity-60 truncate max-w-md">
-                            {decodeURIComponent(item.url?.replace('/api/iframe-proxy?url=', '') || '')}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="px-2 py-0.5 rounded bg-white/5 text-[9px] font-bold opacity-40 uppercase">Encrypted</div>
-                        </div>
-                      </div>
-                      <iframe 
-                        src={item.url} 
-                        className="w-full h-full border-none bg-white" 
-                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-presentation allow-downloads allow-storage-access-by-user-activation"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; camera; microphone; geolocation" 
-                        allowFullScreen
-                      />
-                    </motion.div>
-                  )}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            <div ref={bottomRef} />
-          </div>
-
-          {/* Input Area */}
-          <div className="p-6 bg-black/20 border-t border-white/5">
-            <div className="flex items-center gap-4 relative">
-              <div className={`flex-shrink-0 flex items-center gap-2 font-bold transition-colors ${isReverseSearch ? 'text-yellow-400' : 'text-blue-400'}`}>
-                {isReverseSearch ? (
-                  <Search size={18} />
-                ) : (
-                  <span className="text-xs opacity-40 tracking-tighter">SYS_PROMPT</span>
-                )}
-                <span className="text-sm tracking-widest">{currentDir}</span>
-                <span className="opacity-40">$</span>
-              </div>
-              
-              <div className="flex-1 relative">
-                {isReverseSearch && (
-                  <div className="absolute -top-10 left-0 glass-panel px-3 py-1.5 rounded-lg text-xs animate-in fade-in slide-in-from-bottom-2">
-                    <span className="opacity-50 mr-2">MATCH:</span>
-                    <span className="text-yellow-400 font-bold">{reverseSearchMatch || 'NO_MATCH'}</span>
-                  </div>
-                )}
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={isReverseSearch ? reverseSearchQuery : input}
-                  onChange={handleInputChange}
-                  onKeyDown={handleKeyDown}
-                  className="w-full bg-transparent border-none outline-none text-lg font-mono tracking-tight placeholder:opacity-20"
-                  placeholder={isReverseSearch ? "Search history..." : "Enter command..."}
-                  autoFocus
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-              </div>
-            </div>
-          </div>
-        </main>
-
-        {/* Footer Status Bar */}
-        <footer className="glass-panel rounded-2xl px-6 py-3 flex flex-wrap items-center justify-between gap-4 text-[10px] font-bold tracking-[0.2em] uppercase opacity-70">
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
-              <Globe size={12} className="text-blue-400" />
-              <span>{searchEngine}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Play size={12} className="text-red-400" />
-              <span>Mirror_{ytMirrorIndex + 1}</span>
-            </div>
-            {activeProcesses.length > 0 && (
-              <div className="flex items-center gap-2 text-yellow-400 animate-pulse">
-                <Settings size={12} />
-                <span>{activeProcesses.join('::')}</span>
+        <button 
+          onClick={(e) => {
+            e.stopPropagation();
+            setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+          }}
+          className={`px-3 py-1 rounded text-xs font-bold uppercase tracking-tighter transition-all hover:scale-105 active:scale-95 ${
+            isDark 
+              ? 'bg-green-900/30 text-green-400 border border-green-800 hover:bg-green-900/50' 
+              : 'bg-blue-100 text-blue-700 border border-blue-200 hover:bg-blue-200'
+          }`}
+        >
+          {isDark ? '🌙 Dark Mode' : '☀️ Light Mode'}
+        </button>
+      </div>
+      
+      {/* Terminal Output Area */}
+      <div className="flex-1 overflow-y-auto space-y-2 pb-4">
+        {history.map((item) => (
+          <div key={item.id} className="break-words">
+            
+            {/* Command Echo */}
+            {item.type === 'command' && (
+              <div className="flex">
+                <span className={`mr-2 transition-colors duration-300 ${isDark ? 'text-blue-400' : 'text-blue-600 font-bold'}`}>user@web-term:~$</span>
+                <span className={isDark ? 'text-white' : 'text-gray-900'}>{item.content}</span>
               </div>
             )}
+            
+            {/* Standard Text Output */}
+            {item.type === 'text' && (
+              <pre className={`whitespace-pre-wrap font-mono m-0 p-0 transition-colors duration-300 ${
+                isDark ? 'text-green-300' : 'text-gray-700'
+              }`}>{item.content}</pre>
+            )}
+            
+            {/* Error Output */}
+            {item.type === 'error' && (
+              <div className="text-red-400 font-bold italic">{item.content}</div>
+            )}
+            
+            {/* Iframe Browser Output */}
+            {item.type === 'iframe' && (
+              <div className={`mt-2 border rounded overflow-hidden bg-white w-full max-w-5xl h-[60vh] sm:h-[70vh] relative transition-colors duration-300 ${
+                isDark ? 'border-green-800' : 'border-blue-200 shadow-lg'
+              }`}>
+                {/* Fake Browser Chrome */}
+                <div className="bg-gray-200 text-black px-2 py-1 text-xs border-b border-gray-300 flex items-center justify-between sticky top-0 z-10">
+                  <span className="truncate pr-4">
+                    {decodeURIComponent(item.url?.replace('/api/iframe-proxy?url=', '') || '')}
+                  </span>
+                  <div className="flex gap-1 flex-shrink-0">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-500"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
+                  </div>
+                </div>
+                {/* Actual Iframe */}
+                <iframe 
+                  src={item.url} 
+                  className="w-full h-full border-none bg-white" 
+                  sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-presentation allow-downloads allow-storage-access-by-user-activation"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; camera; microphone; geolocation" 
+                  allowFullScreen
+                  title="Web Browser"
+                />
+              </div>
+            )}
+            
           </div>
-          
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
-              <Clock size={12} />
-              <span>{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-            </div>
-            <div className="px-2 py-0.5 rounded bg-white/10">
-              V4.2.0_STABLE
-            </div>
+        ))}
+        {/* Invisible element to scroll to */}
+        <div ref={bottomRef} />
+      </div>
+      
+      {/* Input Area */}
+      <div className="flex mt-2 items-center mb-8">
+        {isReverseSearch ? (
+          <span className={`mr-2 transition-colors duration-300 ${isDark ? 'text-yellow-400' : 'text-orange-600 font-bold'}`}>
+            (reverse-i-search)`{reverseSearchQuery}': {reverseSearchMatch || ''}
+          </span>
+        ) : (
+          <span className={`mr-2 transition-colors duration-300 ${isDark ? 'text-blue-400' : 'text-blue-600 font-bold'}`}>
+            user@web-term:{currentDir}$
+          </span>
+        )}
+        <input
+          ref={inputRef}
+          type="text"
+          value={isReverseSearch ? reverseSearchQuery : input}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          className={`flex-1 bg-transparent border-none outline-none caret-green-500 transition-colors duration-300 ${
+            isDark ? 'text-white' : 'text-gray-900'
+          }`}
+          autoFocus
+          spellCheck={false}
+          autoComplete="off"
+        />
+      </div>
+
+      {/* Status Bar */}
+      <div className={`fixed bottom-0 left-0 right-0 h-6 flex items-center px-4 text-[10px] sm:text-xs font-bold uppercase tracking-wider z-50 transition-colors duration-300 ${
+        isDark ? 'bg-green-900/80 text-green-400' : 'bg-blue-600 text-white'
+      }`}>
+        <div className="flex items-center gap-4 flex-1">
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">DIR:</span>
+            <span>{currentDir}</span>
           </div>
-        </footer>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">STATUS:</span>
+            <span className={isOnline ? 'text-green-300' : 'text-red-400'}>
+              {isOnline ? '● ONLINE' : '○ OFFLINE'}
+            </span>
+          </div>
+          {activeProcesses.length > 0 && (
+            <div className="flex items-center gap-1 animate-pulse">
+              <span className="opacity-60">JOBS:</span>
+              <span>{activeProcesses.join(', ')}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">ENGINE:</span>
+            <span>{searchEngine.toUpperCase()}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">THEME:</span>
+            <span>{theme.toUpperCase()}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="opacity-60">TIME:</span>
+            <span>{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          </div>
+        </div>
       </div>
     </div>
   );

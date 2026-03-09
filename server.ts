@@ -58,97 +58,72 @@ async function startServer() {
   // This is the magic that allows us to embed websites inside our terminal.
   // It fetches the website, strips out security headers that block iframes,
   // and injects custom scripts to handle navigation.
-  app.get("/api/iframe-proxy", async (req, res) => {
+  const iframeProxyHandler = async (req: express.Request, res: express.Response) => {
     const targetUrl = req.query.url as string;
-    
-    console.log(`[PROXY] Request for: ${targetUrl}`);
     
     if (!targetUrl) {
       return res.status(400).send("Missing URL parameter");
     }
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout for iframe proxy
+    const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
     try {
       const url = new URL(targetUrl);
       
-      // Fetch the website content. 
-      // We use redirect: 'manual' so we can catch redirects and rewrite them 
-      // to stay within our proxy.
-      let response = await fetch(url.toString(), {
+      const fetchOptions: RequestInit = {
+        method: req.method,
         signal: controller.signal,
         redirect: 'manual',
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
           "Accept-Language": "en-US,en;q=0.9",
-          "Accept-Encoding": "identity", // We want raw text, not compressed
-          "Cache-Control": "max-age=0",
-          "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-          "Sec-Ch-Ua-Mobile": "?0",
-          "Sec-Ch-Ua-Platform": '"Windows"',
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
+          "Accept-Encoding": "identity",
           "Referer": url.origin,
           "Origin": url.origin
         }
-      });
-      
-      clearTimeout(timeout);
-      console.log(`[PROXY] Fetched ${targetUrl} - Status: ${response.status}`);
+      };
 
-      // Handle Redirects (301, 302, 303, 307, 308)
+      // Forward body if it's a POST request
+      if (req.method === 'POST' && req.body) {
+        fetchOptions.body = JSON.stringify(req.body);
+        (fetchOptions.headers as any)["Content-Type"] = "application/json";
+      }
+
+      let response = await fetch(url.toString(), fetchOptions);
+      clearTimeout(timeout);
+
+      // Handle Redirects
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get("location");
         if (location) {
           const absoluteLocation = new URL(location, url.toString()).toString();
-          console.log(`[PROXY] Redirecting to: ${absoluteLocation}`);
           return res.redirect(`/api/iframe-proxy?url=${encodeURIComponent(absoluteLocation)}`);
         }
       }
 
-      if (!response.ok) {
-        // Return a custom HTML error page for the iframe
+      if (!response.ok && response.status !== 404) {
         res.status(response.status).send(`
           <div style="font-family: sans-serif; padding: 20px; color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
             <h3 style="margin-top: 0;">Failed to load website</h3>
             <p><strong>URL:</strong> ${targetUrl}</p>
             <p><strong>Status:</strong> ${response.status} ${response.statusText}</p>
-            <p>The website might be blocking proxy requests or is currently unavailable.</p>
           </div>
         `);
         return;
       }
       
-      // --- Header Modification ---
-      // We need to remove headers that prevent the site from loading in an iframe
       const headers = new Headers(response.headers);
-      
-      // Remove security headers that block embedding
       headers.delete("x-frame-options");
       headers.delete("content-security-policy");
       headers.delete("content-security-policy-report-only");
-      headers.delete("x-content-security-policy");
       headers.delete("cross-origin-opener-policy");
-      headers.delete("cross-origin-embedder-policy");
-      headers.delete("cross-origin-resource-policy");
-      headers.delete("report-to");
-      headers.delete("nel");
-      headers.delete("link");
-      
-      // Remove encoding headers because we are going to modify the HTML text
       headers.delete("content-encoding");
       headers.delete("content-length");
-      headers.delete("transfer-encoding");
       
-      // Forward the modified headers to the client
       res.status(response.status);
       headers.forEach((value, key) => {
-        // Don't forward some headers that might cause issues
         if (!['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'upgrade'].includes(key.toLowerCase())) {
           res.setHeader(key, value);
         }
@@ -156,119 +131,123 @@ async function startServer() {
       
       const contentType = response.headers.get("content-type") || "";
       
-      // If it's an HTML page, we need to modify it
       if (contentType.includes("text/html")) {
         let html = await response.text();
-        
-        // --- HTML Sanitization ---
-        
-        // 1. Strip all <script> tags more robustly
-        html = html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '');
-        html = html.replace(/<script\b[^>]*\/>/gi, '');
-        
-        // 2. Strip meta refresh tags
-        html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, '');
-        
-        // 3. Strip CSP meta tags
-        html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, '');
-        html = html.replace(/<meta[^>]+http-equiv=["']?x-content-security-policy["']?[^>]*>/gi, '');
-        
-        // 4. Strip frame-busting JS in attributes (like onload="if(top!=self)...")
-        html = html.replace(/\bon\w+\s*=\s*["'][^"']*?top\s*!==?\s*self[^"']*?["']/gi, '');
-        
-        // --- HTML Injection ---
-        
         const finalUrl = new URL(response.url);
-        
-        // We inject a <base> tag so that relative links (like "/about") resolve correctly
-        // We also inject CSS to force the body to be visible, overriding any frame-busting CSS
+
+        // --- URL Rewriting ---
+        // We rewrite URLs in the HTML so that all resources go through our proxy.
+        // This helps with CORS and relative path issues.
+        const proxyUrl = (originalUrl: string) => {
+          if (!originalUrl || originalUrl.startsWith('data:') || originalUrl.startsWith('javascript:') || originalUrl.startsWith('#')) return originalUrl;
+          try {
+            const absolute = new URL(originalUrl, finalUrl.toString()).toString();
+            return `/api/iframe-proxy?url=${encodeURIComponent(absolute)}`;
+          } catch (e) {
+            return originalUrl;
+          }
+        };
+
+        // Rewrite href, src, action
+        html = html.replace(/(href|src|action)\s*=\s*["']([^"']+)["']/gi, (match, attr, val) => {
+          // Skip some common non-navigation attributes
+          if (attr.toLowerCase() === 'src' && (val.endsWith('.js') || val.endsWith('.css'))) return match; 
+          return `${attr}="${proxyUrl(val)}"`;
+        });
+
         const headInjection = `
           <base href="${finalUrl.origin}${finalUrl.pathname}">
           <style>
-            html, body {
-              display: block !important;
-              visibility: visible !important;
-              opacity: 1 !important;
-            }
+            html, body { display: block !important; visibility: visible !important; opacity: 1 !important; }
+            /* Hide some common overlays that might block interaction */
+            .cookie-banner, #cookie-consent, .modal-backdrop { display: none !important; }
           </style>
         `;
         
-        // We inject a script to intercept clicks and form submissions.
-        // Instead of letting the iframe navigate (which often breaks), we send a message
-        // to our React app, which then runs a new 'browse' command for the new URL.
         const bodyInjection = `
           <script>
-            // Intercept link clicks
+            // Intercept all clicks to ensure they go through the terminal
             document.addEventListener('click', function(e) {
               const a = e.target.closest('a');
-              if (a && a.href && !a.href.startsWith('javascript:')) {
-                e.preventDefault();
-                e.stopPropagation();
-                window.parent.postMessage({ type: 'navigate', url: a.href }, '*');
+              if (a && a.href) {
+                const url = new URL(a.href, document.baseURI).href;
+                if (!url.startsWith('javascript:')) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  // Extract the actual target URL from our proxy URL if it's already proxied
+                  let target = url;
+                  if (url.includes('/api/iframe-proxy?url=')) {
+                    const params = new URLSearchParams(new URL(url, window.location.origin).search);
+                    target = params.get('url') || url;
+                  }
+                  window.parent.postMessage({ type: 'navigate', url: target }, '*');
+                }
               }
             }, true);
             
-            // Intercept form submissions (like search bars)
+            // Intercept form submissions
             document.addEventListener('submit', function(e) {
               const form = e.target.closest('form');
-              if (form && form.method.toUpperCase() === 'GET') {
+              if (form) {
                 e.preventDefault();
                 e.stopPropagation();
                 
-                // Build the new URL with the form data
                 const formData = new FormData(form);
                 const params = new URLSearchParams();
                 for (const pair of formData.entries()) {
-                  params.append(pair[0], pair[1]);
+                  params.append(pair[0], pair[1].toString());
                 }
                 
-                const url = new URL(form.action || window.location.href);
-                const existingParams = new URLSearchParams(url.search);
-                for (const pair of params.entries()) {
-                  existingParams.set(pair[0], pair[1]);
+                let action = form.action || window.location.href;
+                if (action.includes('/api/iframe-proxy?url=')) {
+                  const actionParams = new URLSearchParams(new URL(action, window.location.origin).search);
+                  action = actionParams.get('url') || action;
                 }
-                url.search = existingParams.toString();
-                
-                // Tell the React app to navigate
-                window.parent.postMessage({ type: 'navigate', url: url.toString() }, '*');
+
+                const url = new URL(action);
+                if (form.method.toUpperCase() === 'GET') {
+                  const existingParams = new URLSearchParams(url.search);
+                  for (const pair of params.entries()) {
+                    existingParams.set(pair[0], pair[1]);
+                  }
+                  url.search = existingParams.toString();
+                  window.parent.postMessage({ type: 'navigate', url: url.toString() }, '*');
+                } else {
+                  // For POST, we'll just try to navigate to the action with the params as query for now
+                  // as our terminal 'browse' command is GET-based. 
+                  // In a real browser this would be a POST, but for a terminal proxy, 
+                  // many sites accept GET as a fallback or we'd need a more complex POST handler.
+                  const existingParams = new URLSearchParams(url.search);
+                  for (const pair of params.entries()) {
+                    existingParams.set(pair[0], pair[1]);
+                  }
+                  url.search = existingParams.toString();
+                  window.parent.postMessage({ type: 'navigate', url: url.toString() }, '*');
+                }
               }
             }, true);
+
+            // Shadow top and parent to prevent frame-busting
+            window.top = window.self;
+            window.parent = window.self;
           </script>
         `;
         
-        // Insert our injections into the HTML
-        if (html.includes("<head>")) {
-          html = html.replace("<head>", `<head>\n${headInjection}`);
-        } else {
-          html = `${headInjection}\n${html}`;
-        }
-        
-        if (html.includes("</body>")) {
-          html = html.replace("</body>", `${bodyInjection}\n</body>`);
-        } else {
-          html = `${html}\n${bodyInjection}`;
-        }
-        
+        html = html.replace("<head>", `<head>\n${headInjection}`);
+        html = html.replace("</body>", `${bodyInjection}\n</body>`);
         res.send(html);
       } else {
-        // If it's not HTML (e.g., an image, CSS, or JSON), just send the raw data
         const buffer = await response.arrayBuffer();
         res.send(Buffer.from(buffer));
       }
     } catch (error: any) {
       clearTimeout(timeout);
-      const isTimeout = error.name === 'AbortError';
-      console.error(`[PROXY ERROR] ${isTimeout ? 'Request timed out' : error.message}`);
-      res.status(500).send(`
-        <div style="font-family: sans-serif; padding: 20px; color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
-          <h3 style="margin-top: 0;">Proxy Connection Error</h3>
-          <p><strong>URL:</strong> ${targetUrl}</p>
-          <p><strong>Error:</strong> ${isTimeout ? "The connection timed out (15s). The website might be too slow or blocking our proxy." : error.message}</p>
-          <p>Please check if the URL is correct and reachable.</p>
-        </div>
-      `);
+      res.status(500).send(`<div style="padding:20px;color:red;">Proxy Error: ${error.message}</div>`);
     }
-  });
+  };
+
+  app.get("/api/iframe-proxy", iframeProxyHandler);
+  app.post("/api/iframe-proxy", iframeProxyHandler);
 
   // 3. YouTube Audio Downloader
   app.get("/api/download", async (req, res) => {
