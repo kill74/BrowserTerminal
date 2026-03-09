@@ -21,14 +21,20 @@ async function startServer() {
       return res.status(400).json({ error: "Missing URL parameter" });
     }
     
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
     try {
       const response = await fetch(targetUrl, {
+        signal: controller.signal,
         headers: {
           // Pretend to be a normal browser so websites don't block us
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
       });
       
+      clearTimeout(timeout);
+
       if (!response.ok) {
         return res.status(response.status).json({ 
           error: `Failed to fetch: ${response.status} ${response.statusText}`,
@@ -39,8 +45,12 @@ async function startServer() {
       const text = await response.text();
       res.json({ content: text });
     } catch (error: any) {
-      console.error(`[PROXY ERROR] ${error.message}`);
-      res.status(500).json({ error: `Connection error: ${error.message}` });
+      clearTimeout(timeout);
+      const isTimeout = error.name === 'AbortError';
+      console.error(`[PROXY ERROR] ${isTimeout ? 'Request timed out' : error.message}`);
+      res.status(500).json({ 
+        error: isTimeout ? "Connection timed out (10s)" : `Connection error: ${error.message}` 
+      });
     }
   });
 
@@ -57,6 +67,9 @@ async function startServer() {
       return res.status(400).send("Missing URL parameter");
     }
     
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout for iframe proxy
+
     try {
       const url = new URL(targetUrl);
       
@@ -64,16 +77,28 @@ async function startServer() {
       // We use redirect: 'manual' so we can catch redirects and rewrite them 
       // to stay within our proxy.
       let response = await fetch(url.toString(), {
+        signal: controller.signal,
         redirect: 'manual',
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache"
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Encoding": "identity", // We want raw text, not compressed
+          "Cache-Control": "max-age=0",
+          "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": '"Windows"',
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+          "Upgrade-Insecure-Requests": "1",
+          "Referer": url.origin,
+          "Origin": url.origin
         }
       });
       
+      clearTimeout(timeout);
       console.log(`[PROXY] Fetched ${targetUrl} - Status: ${response.status}`);
 
       // Handle Redirects (301, 302, 303, 307, 308)
@@ -111,6 +136,9 @@ async function startServer() {
       headers.delete("cross-origin-opener-policy");
       headers.delete("cross-origin-embedder-policy");
       headers.delete("cross-origin-resource-policy");
+      headers.delete("report-to");
+      headers.delete("nel");
+      headers.delete("link");
       
       // Remove encoding headers because we are going to modify the HTML text
       headers.delete("content-encoding");
@@ -228,12 +256,14 @@ async function startServer() {
         res.send(Buffer.from(buffer));
       }
     } catch (error: any) {
-      console.error(`[PROXY ERROR] ${error.message}`);
+      clearTimeout(timeout);
+      const isTimeout = error.name === 'AbortError';
+      console.error(`[PROXY ERROR] ${isTimeout ? 'Request timed out' : error.message}`);
       res.status(500).send(`
         <div style="font-family: sans-serif; padding: 20px; color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px;">
           <h3 style="margin-top: 0;">Proxy Connection Error</h3>
           <p><strong>URL:</strong> ${targetUrl}</p>
-          <p><strong>Error:</strong> ${error.message}</p>
+          <p><strong>Error:</strong> ${isTimeout ? "The connection timed out (15s). The website might be too slow or blocking our proxy." : error.message}</p>
           <p>Please check if the URL is correct and reachable.</p>
         </div>
       `);
