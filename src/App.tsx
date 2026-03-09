@@ -306,9 +306,18 @@ export default function App() {
           break;
         }
         
-        // Twitch requires the 'parent' parameter to match the current domain
-        const parent = window.location.hostname;
-        const twitchUrl = `https://player.twitch.tv/?channel=${channel}&parent=${parent}&autoplay=true`;
+        // Twitch requires ALL parent domains in the chain to be specified
+        const hostname = window.location.hostname;
+        const parents = [hostname];
+        
+        // Add AI Studio domains if we're likely running inside it
+        if (hostname.includes('run.app')) {
+          parents.push('ai.studio.google.com');
+          parents.push('aistudio.google.com');
+        }
+        
+        const parentParams = parents.map(p => `parent=${p}`).join('&');
+        const twitchUrl = `https://player.twitch.tv/?channel=${channel}&${parentParams}&autoplay=true&muted=false`;
         
         appendToHistory({
           type: 'iframe',
