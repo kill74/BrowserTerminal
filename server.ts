@@ -1,5 +1,6 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import ytdl from "@distube/ytdl-core";
 
 async function startServer() {
   const app = express();
@@ -59,17 +60,31 @@ async function startServer() {
     try {
       const url = new URL(targetUrl);
       
-      // Fetch the website content
-      const response = await fetch(url.toString(), {
+      // Fetch the website content. 
+      // We use redirect: 'manual' so we can catch redirects and rewrite them 
+      // to stay within our proxy.
+      let response = await fetch(url.toString(), {
+        redirect: 'manual',
         headers: {
-          // Use a very standard browser user-agent
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5"
+          "Accept-Language": "en-US,en;q=0.5",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache"
         }
       });
       
       console.log(`[PROXY] Fetched ${targetUrl} - Status: ${response.status}`);
+
+      // Handle Redirects (301, 302, 303, 307, 308)
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (location) {
+          const absoluteLocation = new URL(location, url.toString()).toString();
+          console.log(`[PROXY] Redirecting to: ${absoluteLocation}`);
+          return res.redirect(`/api/iframe-proxy?url=${encodeURIComponent(absoluteLocation)}`);
+        }
+      }
 
       if (!response.ok) {
         // Return a custom HTML error page for the iframe
@@ -91,11 +106,13 @@ async function startServer() {
       // Remove security headers that block embedding
       headers.delete("x-frame-options");
       headers.delete("content-security-policy");
+      headers.delete("content-security-policy-report-only");
+      headers.delete("x-content-security-policy");
       headers.delete("cross-origin-opener-policy");
       headers.delete("cross-origin-embedder-policy");
+      headers.delete("cross-origin-resource-policy");
       
       // Remove encoding headers because we are going to modify the HTML text
-      // If we leave these, the browser will try to decompress our modified text and fail
       headers.delete("content-encoding");
       headers.delete("content-length");
       headers.delete("transfer-encoding");
@@ -103,7 +120,10 @@ async function startServer() {
       // Forward the modified headers to the client
       res.status(response.status);
       headers.forEach((value, key) => {
-        res.setHeader(key, value);
+        // Don't forward some headers that might cause issues
+        if (!['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'upgrade'].includes(key.toLowerCase())) {
+          res.setHeader(key, value);
+        }
       });
       
       const contentType = response.headers.get("content-type") || "";
@@ -114,18 +134,19 @@ async function startServer() {
         
         // --- HTML Sanitization ---
         
-        // 1. Strip all <script> tags. 
-        // Why? Many sites have "frame-busting" scripts that detect if they are in an iframe
-        // and force the parent window to redirect. Removing scripts prevents this.
-        html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+        // 1. Strip all <script> tags more robustly
+        html = html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '');
+        html = html.replace(/<script\b[^>]*\/>/gi, '');
         
-        // 2. Strip meta refresh tags.
-        // Why? Prevents the page from automatically redirecting us away.
+        // 2. Strip meta refresh tags
         html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, '');
         
-        // 3. Strip Content-Security-Policy meta tags.
-        // Why? Same reason as the HTTP headers, they can block our injected scripts.
+        // 3. Strip CSP meta tags
         html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, '');
+        html = html.replace(/<meta[^>]+http-equiv=["']?x-content-security-policy["']?[^>]*>/gi, '');
+        
+        // 4. Strip frame-busting JS in attributes (like onload="if(top!=self)...")
+        html = html.replace(/\bon\w+\s*=\s*["'][^"']*?top\s*!==?\s*self[^"']*?["']/gi, '');
         
         // --- HTML Injection ---
         
@@ -216,6 +237,36 @@ async function startServer() {
           <p>Please check if the URL is correct and reachable.</p>
         </div>
       `);
+    }
+  });
+
+  // 3. YouTube Audio Downloader
+  app.get("/api/download", async (req, res) => {
+    const videoUrl = req.query.url as string;
+    
+    if (!videoUrl) {
+      return res.status(400).json({ error: "Missing URL parameter" });
+    }
+    
+    try {
+      if (!ytdl.validateURL(videoUrl)) {
+        return res.status(400).json({ error: "Invalid YouTube URL" });
+      }
+      
+      const info = await ytdl.getInfo(videoUrl);
+      const title = info.videoDetails.title.replace(/[^\w\s]/gi, '');
+      
+      res.setHeader('Content-Disposition', `attachment; filename="${title}.mp3"`);
+      res.setHeader('Content-Type', 'audio/mpeg');
+      
+      ytdl(videoUrl, {
+        filter: 'audioonly',
+        quality: 'highestaudio',
+      }).pipe(res);
+      
+    } catch (error: any) {
+      console.error(`[DOWNLOAD ERROR] ${error.message}`);
+      res.status(500).json({ error: `Download failed: ${error.message}` });
     }
   });
 

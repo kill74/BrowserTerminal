@@ -1,5 +1,5 @@
 {
   "name": "Web Terminal",
   "description": "A retro terminal interface to browse and fetch websites.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["camera", "microphone", "geolocation"]
 }
