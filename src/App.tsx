@@ -1,5 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Terminal as TerminalIcon } from 'lucide-react';
+import { Terminal as TerminalIcon, Eye, EyeOff } from 'lucide-react';
+import Editor from 'react-simple-code-editor';
+import { highlight, languages } from 'prismjs';
+import 'prismjs/components/prism-clike';
+import 'prismjs/components/prism-javascript';
+import 'prismjs/components/prism-css';
+import 'prismjs/components/prism-markup';
+import 'prismjs/components/prism-json';
+import 'prismjs/components/prism-markdown';
+import 'prismjs/components/prism-python';
+import 'prismjs/components/prism-bash';
+import 'prismjs/themes/prism-tomorrow.css';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // ============================================================================
 // TYPES & CONSTANTS
@@ -33,6 +46,14 @@ const HELP_TEXT = `Available commands:
   ai <prompt>   - Chat with local Ollama (requires Ollama running)
   ollama <cmd>  - Ollama config (ollama status, ollama model <name>)
   twitch <name> - Watch a Twitch stream
+  ls            - List files in virtual file system
+  touch <file>  - Create an empty file
+  cat <file>    - Read a file
+  rm <file>     - Delete a file
+  edit <file>   - Open the built-in code editor (aliases: vim, nvim, emacs)
+  run <file>    - Execute a JavaScript file
+  github <user> - Fetch a GitHub profile
+  git clone <url>- Clone a GitHub repository into VFS
   
 Note: Clicking links inside the browser will automatically run a new browse command!`;
 
@@ -48,7 +69,7 @@ const INITIAL_HISTORY: HistoryItem[] = [
   { id: '2', type: 'text', content: 'Type "help" for a list of commands.' },
 ];
 
-const COMMANDS = ['help', 'clear', 'search', 'engine', 'browse', 'youtube', 'watch', 'mirror', 'curl', 'download', 'theme', 'css', 'cd', 'echo', 'date', 'ai', 'ollama', 'twitch'];
+const COMMANDS = ['help', 'clear', 'search', 'engine', 'browse', 'youtube', 'watch', 'mirror', 'curl', 'download', 'theme', 'css', 'cd', 'echo', 'date', 'ai', 'ollama', 'twitch', 'ls', 'touch', 'cat', 'rm', 'edit', 'vim', 'nvim', 'emacs', 'run', 'github', 'git'];
 const THEME_MODES = ['light', 'dark', 'toggle', ...Object.keys(PRESET_THEMES)];
 
 const SEARCH_ENGINES: Record<string, string> = {
@@ -74,11 +95,90 @@ const YT_MIRRORS = [
 
 export default function App() {
   // --- State ---
-  const [history, setHistory] = useState<HistoryItem[]>(INITIAL_HISTORY);
-  const [input, setInput] = useState('');
+  type TerminalTabState = {
+    id: string;
+    history: HistoryItem[];
+    input: string;
+    currentDir: string;
+    commandHistory: string[];
+    historyIndex: number;
+    isReverseSearch: boolean;
+    reverseSearchQuery: string;
+    reverseSearchMatch: string | null;
+    reverseSearchIndex: number;
+    completions: string[];
+    completionIndex: number;
+  };
+
+  const createNewTab = (): TerminalTabState => ({
+    id: Date.now().toString() + Math.random().toString(36).substring(7),
+    history: INITIAL_HISTORY,
+    input: '',
+    currentDir: '~',
+    commandHistory: [],
+    historyIndex: -1,
+    isReverseSearch: false,
+    reverseSearchQuery: '',
+    reverseSearchMatch: null,
+    reverseSearchIndex: -1,
+    completions: [],
+    completionIndex: -1,
+  });
+
+  const [tabs, setTabs] = useState<TerminalTabState[]>([createNewTab()]);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
+
+  const activeTab = tabs[activeTabIndex];
+  const activeTabId = activeTab.id;
+
+  const updateTab = (updates: Partial<TerminalTabState> | ((prev: TerminalTabState) => Partial<TerminalTabState>)) => {
+    setTabs(prev => {
+      const tabIndex = prev.findIndex(t => t.id === activeTabId);
+      if (tabIndex === -1) return prev; // Tab was closed
+      
+      const newTabs = [...prev];
+      const current = newTabs[tabIndex];
+      const resolvedUpdates = typeof updates === 'function' ? updates(current) : updates;
+      newTabs[tabIndex] = { ...current, ...resolvedUpdates };
+      return newTabs;
+    });
+  };
+
+  const history = activeTab.history;
+  const setHistory = (val: HistoryItem[] | ((prev: HistoryItem[]) => HistoryItem[])) => updateTab(prev => ({ history: typeof val === 'function' ? val(prev.history) : val }));
+  
+  const input = activeTab.input;
+  const setInput = (val: string | ((prev: string) => string)) => updateTab(prev => ({ input: typeof val === 'function' ? val(prev.input) : val }));
+  
+  const currentDir = activeTab.currentDir;
+  const setCurrentDir = (val: string | ((prev: string) => string)) => updateTab(prev => ({ currentDir: typeof val === 'function' ? val(prev.currentDir) : val }));
+  
+  const isReverseSearch = activeTab.isReverseSearch;
+  const setIsReverseSearch = (val: boolean | ((prev: boolean) => boolean)) => updateTab(prev => ({ isReverseSearch: typeof val === 'function' ? val(prev.isReverseSearch) : val }));
+  
+  const reverseSearchQuery = activeTab.reverseSearchQuery;
+  const setReverseSearchQuery = (val: string | ((prev: string) => string)) => updateTab(prev => ({ reverseSearchQuery: typeof val === 'function' ? val(prev.reverseSearchQuery) : val }));
+  
+  const reverseSearchMatch = activeTab.reverseSearchMatch;
+  const setReverseSearchMatch = (val: string | null | ((prev: string | null) => string | null)) => updateTab(prev => ({ reverseSearchMatch: typeof val === 'function' ? val(prev.reverseSearchMatch) : val }));
+  
+  const reverseSearchIndex = activeTab.reverseSearchIndex;
+  const setReverseSearchIndex = (val: number | ((prev: number) => number)) => updateTab(prev => ({ reverseSearchIndex: typeof val === 'function' ? val(prev.reverseSearchIndex) : val }));
+  
+  const commandHistory = activeTab.commandHistory;
+  const setCommandHistory = (val: string[] | ((prev: string[]) => string[])) => updateTab(prev => ({ commandHistory: typeof val === 'function' ? val(prev.commandHistory) : val }));
+  
+  const historyIndex = activeTab.historyIndex;
+  const setHistoryIndex = (val: number | ((prev: number) => number)) => updateTab(prev => ({ historyIndex: typeof val === 'function' ? val(prev.historyIndex) : val }));
+  
+  const completions = activeTab.completions;
+  const setCompletions = (val: string[] | ((prev: string[]) => string[])) => updateTab(prev => ({ completions: typeof val === 'function' ? val(prev.completions) : val }));
+  
+  const completionIndex = activeTab.completionIndex;
+  const setCompletionIndex = (val: number | ((prev: number) => number)) => updateTab(prev => ({ completionIndex: typeof val === 'function' ? val(prev.completionIndex) : val }));
+
   const [theme, setTheme] = useState<Theme>('dark');
   const [customCSS, setCustomCSS] = useState<string>('');
-  const [currentDir, setCurrentDir] = useState<string>('~');
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [activeProcesses, setActiveProcesses] = useState<string[]>([]);
   const [ytMirrorIndex, setYtMirrorIndex] = useState(0);
@@ -86,19 +186,23 @@ export default function App() {
   const [ollamaModel, setOllamaModel] = useState('llama3');
   const [ollamaHost, setOllamaHost] = useState('http://localhost:11434');
   
-  // Reverse search state
-  const [isReverseSearch, setIsReverseSearch] = useState(false);
-  const [reverseSearchQuery, setReverseSearchQuery] = useState('');
-  const [reverseSearchMatch, setReverseSearchMatch] = useState<string | null>(null);
-  const [reverseSearchIndex, setReverseSearchIndex] = useState(-1);
-
-  // Command history for up/down arrow navigation
-  const [commandHistory, setCommandHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState<number>(-1);
-
-  // For tab completion cycling
-  const [completions, setCompletions] = useState<string[]>([]);
-  const [completionIndex, setCompletionIndex] = useState<number>(-1);
+  // Virtual File System & Editor
+  type VFSEntry = { content: string; createdAt: string; isDir?: boolean };
+  const [vfs, setVfs] = useState<Record<string, VFSEntry>>({
+    'hello.js': { content: 'console.log("Hello from WebTerm OS!");\n// Try running this with: run hello.js', createdAt: new Date().toISOString() },
+    'readme.txt': { content: 'Welcome to the Virtual File System.\nUse ls, touch, cat, rm, edit, and run.', createdAt: new Date().toISOString() }
+  });
+  const [editor, setEditor] = useState<{
+    isOpen: boolean;
+    tabs: { file: string; content: string; mode: string }[];
+    activeTabIndex: number;
+  }>({ isOpen: false, tabs: [], activeTabIndex: 0 });
+  const [closeConfirm, setCloseConfirm] = useState<{
+    isOpen: boolean;
+    type: 'single' | 'all';
+    tabIndex?: number;
+  }>({ isOpen: false, type: 'all' });
+  const [showPreview, setShowPreview] = useState(false);
 
   // --- Refs ---
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -117,6 +221,37 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  // Keyboard shortcuts for tabs
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Alt+T for new tab
+      if (e.altKey && e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        setTabs(prev => [...prev, createNewTab()]);
+        setActiveTabIndex(tabs.length);
+      }
+      // Alt+W for close tab
+      else if (e.altKey && e.key.toLowerCase() === 'w') {
+        e.preventDefault();
+        if (tabs.length > 1) {
+          setTabs(prev => prev.filter((_, i) => i !== activeTabIndex));
+          setActiveTabIndex(prev => Math.max(0, prev === tabs.length - 1 ? prev - 1 : prev));
+        }
+      }
+      // Alt+Left/Right to switch tabs
+      else if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setActiveTabIndex(prev => (prev > 0 ? prev - 1 : tabs.length - 1));
+      }
+      else if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault();
+        setActiveTabIndex(prev => (prev < tabs.length - 1 ? prev + 1 : 0));
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [tabs.length, activeTabIndex]);
 
   // Auto-scroll to bottom when history changes
   useEffect(() => {
@@ -190,7 +325,7 @@ export default function App() {
 
   // --- Command Execution ---
 
-  const handleCommand = React.useCallback(async (cmd: string) => {
+  const handleCommand = async (cmd: string) => {
     const trimmed = cmd.trim();
     if (!trimmed) return;
 
@@ -324,6 +459,269 @@ export default function App() {
           content: `Loading Twitch stream: ${channel}`,
           url: twitchUrl
         });
+        break;
+      }
+
+      // --- Virtual File System Commands ---
+      case 'ls': {
+        const files = Object.keys(vfs);
+        if (files.length === 0) {
+          appendToHistory({ type: 'text', content: 'Directory is empty.' });
+        } else {
+          const header = `${'NAME'.padEnd(20)} ${'SIZE'.padEnd(10)} ${'CREATED'.padEnd(20)} TYPE`;
+          const fileList = files.map(f => {
+            const entry = vfs[f];
+            const size = entry.isDir ? '-' : new Blob([entry.content]).size;
+            const date = new Date(entry.createdAt).toLocaleString();
+            return `${f.padEnd(20)} ${size.toString().padEnd(10)} ${date.padEnd(20)} ${entry.isDir ? '[DIR]' : 'FILE'}`;
+          }).join('\n');
+          appendToHistory({ type: 'text', content: `${header}\n${fileList}` });
+        }
+        break;
+      }
+
+      case 'touch': {
+        const file = args[0];
+        if (!file) {
+          appendToHistory({ type: 'error', content: 'Usage: touch <filename>' });
+          break;
+        }
+        if (!vfs[file]) {
+          setVfs(prev => ({ ...prev, [file]: { content: '', createdAt: new Date().toISOString() } }));
+        }
+        break;
+      }
+
+      case 'mkdir': {
+        const dir = args[0];
+        if (!dir) {
+          appendToHistory({ type: 'error', content: 'Usage: mkdir <dirname>' });
+          break;
+        }
+        if (!vfs[dir]) {
+          setVfs(prev => ({ ...prev, [dir]: { content: '', createdAt: new Date().toISOString(), isDir: true } }));
+        } else {
+          appendToHistory({ type: 'error', content: `mkdir: ${dir}: File exists` });
+        }
+        break;
+      }
+
+      case 'cat': {
+        const file = args[0];
+        if (!file) {
+          appendToHistory({ type: 'error', content: 'Usage: cat <filename>' });
+          break;
+        }
+        if (vfs[file] !== undefined) {
+          appendToHistory({ type: 'text', content: vfs[file].content });
+        } else {
+          appendToHistory({ type: 'error', content: `cat: ${file}: No such file` });
+        }
+        break;
+      }
+
+      case 'rm': {
+        const file = args[0];
+        if (!file) {
+          appendToHistory({ type: 'error', content: 'Usage: rm <filename>' });
+          break;
+        }
+        if (vfs[file] !== undefined) {
+          setVfs(prev => {
+            const newVfs = { ...prev };
+            delete newVfs[file];
+            return newVfs;
+          });
+          appendToHistory({ type: 'text', content: `Removed ${file}` });
+        } else {
+          appendToHistory({ type: 'error', content: `rm: ${file}: No such file` });
+        }
+        break;
+      }
+
+      case 'edit':
+      case 'vim':
+      case 'nvim':
+      case 'emacs': {
+        const file = args[0] || 'Untitled';
+        setEditor(prev => {
+          const existingTabIndex = prev.tabs.findIndex(t => t.file === file);
+          if (existingTabIndex >= 0) {
+            return { ...prev, isOpen: true, activeTabIndex: existingTabIndex };
+          }
+          const newTab = { file, content: vfs[file]?.content || '', mode: command };
+          return {
+            isOpen: true,
+            tabs: [...prev.tabs, newTab],
+            activeTabIndex: prev.tabs.length
+          };
+        });
+        break;
+      }
+
+      case 'run': {
+        const file = args[0];
+        if (!file) {
+          appendToHistory({ type: 'error', content: 'Usage: run <filename.js>' });
+          break;
+        }
+        if (vfs[file] !== undefined) {
+          try {
+            // Capture console.log output
+            let output = '';
+            const originalLog = console.log;
+            console.log = (...logArgs) => {
+              output += logArgs.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n';
+            };
+            
+            // Execute the code
+            // eslint-disable-next-line no-eval
+            const result = eval(vfs[file].content);
+            console.log = originalLog;
+            
+            if (output) {
+              appendToHistory({ type: 'text', content: output.trim() });
+            } else if (result !== undefined) {
+              appendToHistory({ type: 'text', content: String(result) });
+            } else {
+              appendToHistory({ type: 'text', content: '[Execution finished with no output]' });
+            }
+          } catch (e: any) {
+            appendToHistory({ type: 'error', content: `Execution Error: ${e.message}` });
+          }
+        } else {
+          appendToHistory({ type: 'error', content: `run: ${file}: No such file` });
+        }
+        break;
+      }
+
+      case 'find': {
+        const query = args[0];
+        if (!query) {
+          appendToHistory({ type: 'error', content: 'Usage: find <query>' });
+          break;
+        }
+        const matches = Object.entries(vfs).filter(([name, entry]) => 
+          name.includes(query) || entry.content.includes(query)
+        );
+        
+        if (matches.length === 0) {
+          appendToHistory({ type: 'text', content: `No files found matching '${query}'` });
+        } else {
+          const result = matches.map(([name, entry]) => 
+            `${name} (${entry.isDir ? 'DIR' : 'FILE'})`
+          ).join('\n');
+          appendToHistory({ type: 'text', content: `Found ${matches.length} match(es):\n${result}` });
+        }
+        break;
+      }
+
+      case 'git': {
+        const sub = args[0];
+        if (sub === 'clone') {
+          const repoUrl = args[1];
+          if (!repoUrl) {
+            appendToHistory({ type: 'error', content: 'Usage: git clone <repository-url>' });
+            break;
+          }
+          
+          let owner = '';
+          let repo = '';
+          try {
+            const urlString = repoUrl.startsWith('http') ? repoUrl : `https://${repoUrl}`;
+            const url = new URL(urlString);
+            const parts = url.pathname.split('/').filter(Boolean);
+            if (url.hostname.includes('github.com') && parts.length >= 2) {
+              owner = parts[0];
+              repo = parts[1].replace('.git', '');
+            } else {
+              throw new Error('Only GitHub repositories are supported currently.');
+            }
+          } catch (e: any) {
+            appendToHistory({ type: 'error', content: `Invalid repository URL: ${e.message}` });
+            break;
+          }
+
+          appendToHistory({ type: 'text', content: `Cloning into '${repo}'...` });
+          setActiveProcesses(prev => [...prev, 'GIT']);
+          
+          try {
+            const branchRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+            if (!branchRes.ok) throw new Error(`Repository not found: ${branchRes.status}`);
+            const repoData = await branchRes.json();
+            const defaultBranch = repoData.default_branch;
+
+            const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`);
+            if (!treeRes.ok) throw new Error(`Failed to fetch repository tree: ${treeRes.status}`);
+            const treeData = await treeRes.json();
+
+            const files = treeData.tree.filter((t: any) => t.type === 'blob').slice(0, 30);
+            
+            appendToHistory({ type: 'text', content: `Fetching ${files.length} files (limited to 30 for VFS)...` });
+            
+            let fetched = 0;
+            const newVfs = { ...vfs };
+            
+            for (const file of files) {
+              try {
+                const fileRes = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${file.path}`);
+                if (fileRes.ok) {
+                  const content = await fileRes.text();
+                  newVfs[`${repo}/${file.path}`] = { content, createdAt: new Date().toISOString() };
+                  fetched++;
+                }
+              } catch (e) {
+                // skip failed files
+              }
+            }
+            
+            setVfs(newVfs);
+            appendToHistory({ type: 'text', content: `Successfully cloned ${fetched} files into '${repo}/'.\nUse 'ls' to view files.` });
+          } catch (e: any) {
+            appendToHistory({ type: 'error', content: `Git Error: ${e.message}` });
+          } finally {
+            setActiveProcesses(prev => prev.filter(p => p !== 'GIT'));
+          }
+        } else {
+          appendToHistory({ type: 'error', content: 'Usage: git clone <repository-url>' });
+        }
+        break;
+      }
+
+      case 'github': {
+        const username = args[0];
+        if (!username) {
+          appendToHistory({ type: 'error', content: 'Usage: github <username>' });
+          break;
+        }
+        setActiveProcesses(prev => [...prev, 'GitHub']);
+        try {
+          const res = await fetch(`https://api.github.com/users/${username}`);
+          if (!res.ok) throw new Error(`User not found: ${res.status}`);
+          const data = await res.json();
+          
+          const reposRes = await fetch(`https://api.github.com/users/${username}/repos?sort=updated&per_page=3`);
+          const repos = await reposRes.json();
+          
+          let out = `👤 GitHub Profile: ${data.name || data.login}\n`;
+          out += `📝 Bio: ${data.bio || 'No bio'}\n`;
+          out += `🌟 Followers: ${data.followers} | Following: ${data.following}\n`;
+          out += `📦 Public Repos: ${data.public_repos}\n\n`;
+          out += `Recent Repositories:\n`;
+          if (repos && repos.length > 0) {
+            repos.forEach((r: any) => {
+              out += `  - ${r.name} (⭐ ${r.stargazers_count})\n`;
+              out += `    ${r.description || 'No description'}\n`;
+            });
+          } else {
+            out += `  No public repositories found.\n`;
+          }
+          appendToHistory({ type: 'text', content: out });
+        } catch (e: any) {
+          appendToHistory({ type: 'error', content: `GitHub Error: ${e.message}` });
+        } finally {
+          setActiveProcesses(prev => prev.filter(p => p !== 'GitHub'));
+        }
         break;
       }
         
@@ -538,7 +936,7 @@ export default function App() {
       default:
         appendToHistory({ type: 'error', content: `Command not found: ${command}` });
     }
-  }, [theme]); // eslint-disable-line react-hooks/exhaustive-deps
+  };
 
   // Listen for messages from the iframe proxy (e.g., when a user clicks a link)
   useEffect(() => {
@@ -656,6 +1054,82 @@ export default function App() {
   };
 
   // ============================================================================
+  // EDITOR CLOSE CONFIRMATION LOGIC
+  // ============================================================================
+  
+  const hasUnsavedChanges = (index?: number) => {
+    if (index !== undefined) {
+      const tab = editor.tabs[index];
+      return tab && tab.content !== (vfs[tab.file] || '');
+    }
+    return editor.tabs.some(tab => tab.content !== (vfs[tab.file] || ''));
+  };
+
+  const executeCloseTab = (index: number) => {
+    setEditor(prev => {
+      const newTabs = prev.tabs.filter((_, i) => i !== index);
+      if (newTabs.length === 0) {
+        setTimeout(() => inputRef.current?.focus(), 100);
+        return { isOpen: false, tabs: [], activeTabIndex: 0 };
+      }
+      return {
+        ...prev,
+        tabs: newTabs,
+        activeTabIndex: Math.min(prev.activeTabIndex, newTabs.length - 1)
+      };
+    });
+  };
+
+  const handleCloseTab = (index: number) => {
+    if (hasUnsavedChanges(index)) {
+      setCloseConfirm({ isOpen: true, type: 'single', tabIndex: index });
+    } else {
+      executeCloseTab(index);
+    }
+  };
+
+  const executeCloseEditor = () => {
+    setEditor({ isOpen: false, tabs: [], activeTabIndex: 0 });
+    setTimeout(() => inputRef.current?.focus(), 100);
+  };
+
+  const handleCloseEditor = () => {
+    if (hasUnsavedChanges()) {
+      setCloseConfirm({ isOpen: true, type: 'all' });
+    } else {
+      executeCloseEditor();
+    }
+  };
+
+  const handleConfirmClose = (save: boolean) => {
+    if (save) {
+      if (closeConfirm.type === 'single' && closeConfirm.tabIndex !== undefined) {
+        const tab = editor.tabs[closeConfirm.tabIndex];
+        setVfs(prev => ({ ...prev, [tab.file]: { content: tab.content, createdAt: prev[tab.file]?.createdAt || new Date().toISOString() } }));
+        appendToHistory({ type: 'text', content: `Saved ${tab.file}` });
+      } else {
+        // Save all
+        const newVfs = { ...vfs };
+        editor.tabs.forEach(tab => {
+          if (tab.content !== (vfs[tab.file]?.content || '')) {
+            newVfs[tab.file] = { content: tab.content, createdAt: vfs[tab.file]?.createdAt || new Date().toISOString() };
+            appendToHistory({ type: 'text', content: `Saved ${tab.file}` });
+          }
+        });
+        setVfs(newVfs);
+      }
+    }
+    
+    setCloseConfirm({ isOpen: false, type: 'all' });
+    
+    if (closeConfirm.type === 'single' && closeConfirm.tabIndex !== undefined) {
+      executeCloseTab(closeConfirm.tabIndex);
+    } else {
+      executeCloseEditor();
+    }
+  };
+
+  // ============================================================================
   // RENDER
   // ============================================================================
 
@@ -672,7 +1146,7 @@ export default function App() {
       {customCSS && <style dangerouslySetInnerHTML={{ __html: customCSS }} />}
       
       {/* Header */}
-      <div className={`flex items-center justify-between mb-4 border-b pb-2 transition-colors duration-300 ${
+      <div className={`flex items-center justify-between mb-2 border-b pb-2 transition-colors duration-300 ${
         isDark ? 'text-green-400 border-green-900' : 'text-blue-600 border-blue-200'
       }`}>
         <div className="flex items-center gap-2">
@@ -692,6 +1166,102 @@ export default function App() {
           }`}
         >
           {isDark ? '🌙 Dark Mode' : '☀️ Light Mode'}
+        </button>
+      </div>
+
+      {/* Tab Bar */}
+      <div className={`flex overflow-x-auto mb-4 border-b transition-colors duration-300 ${
+        isDark ? 'border-green-900' : 'border-blue-200'
+      }`}>
+        {tabs.map((tab, index) => (
+          <div
+            key={tab.id}
+            className={`flex items-center px-4 py-2 cursor-pointer border-r text-sm transition-colors duration-300 ${
+              isDark ? 'border-green-900' : 'border-blue-200'
+            } ${
+              index === activeTabIndex 
+                ? (isDark ? 'bg-green-900/30 text-green-400' : 'bg-blue-100 text-blue-700') 
+                : (isDark ? 'hover:bg-green-900/20 text-green-600' : 'hover:bg-blue-50 text-blue-500')
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setActiveTabIndex(index);
+            }}
+          >
+            <span>Terminal {index + 1}</span>
+            {tabs.length > 1 && (
+              <button
+                className={`ml-3 focus:outline-none ${isDark ? 'hover:text-red-400' : 'hover:text-red-500'}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setTabs(prev => prev.filter((_, i) => i !== index));
+                  if (activeTabIndex === index) {
+                    setActiveTabIndex(Math.max(0, index - 1));
+                  } else if (activeTabIndex > index) {
+                    setActiveTabIndex(activeTabIndex - 1);
+                  }
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          className={`px-4 py-2 text-sm font-bold transition-colors duration-300 ${
+            isDark ? 'hover:bg-green-900/20 text-green-500' : 'hover:bg-blue-50 text-blue-600'
+          }`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setTabs(prev => [...prev, createNewTab()]);
+            setActiveTabIndex(tabs.length);
+          }}
+          title="New Tab (Alt+T)"
+        >
+          + New Tab
+        </button>
+      </div>
+
+      {/* URL Bar */}
+      <div 
+        className={`flex items-center gap-2 mb-4 border-b pb-2 transition-colors duration-300 ${
+          isDark ? 'border-green-900' : 'border-blue-200'
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span className={`font-bold ${isDark ? 'text-green-400' : 'text-blue-600'}`}>URL:</span>
+        <input
+          type="text"
+          placeholder="Enter website URL or search query..."
+          className={`flex-1 bg-transparent outline-none px-2 py-1 transition-colors duration-300 ${
+            isDark ? 'text-white placeholder-green-800' : 'text-gray-900 placeholder-blue-300'
+          }`}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const val = e.currentTarget.value.trim();
+              if (val) {
+                handleCommand(`browse ${val}`);
+                e.currentTarget.value = '';
+              }
+            }
+          }}
+        />
+        <button
+          onClick={(e) => {
+            const input = e.currentTarget.previousElementSibling as HTMLInputElement;
+            const val = input.value.trim();
+            if (val) {
+              handleCommand(`browse ${val}`);
+              input.value = '';
+            }
+          }}
+          className={`px-3 py-1 rounded text-xs font-bold uppercase tracking-tighter transition-all hover:scale-105 active:scale-95 ${
+            isDark 
+              ? 'bg-green-900/30 text-green-400 border border-green-800 hover:bg-green-900/50' 
+              : 'bg-blue-100 text-blue-700 border border-blue-200 hover:bg-blue-200'
+          }`}
+        >
+          Go
         </button>
       </div>
       
@@ -779,6 +1349,207 @@ export default function App() {
           autoComplete="off"
         />
       </div>
+
+      {/* Editor Overlay */}
+      {editor.isOpen && (
+        <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col font-mono">
+          {/* Tab Bar */}
+          <div className="flex bg-gray-900 text-gray-400 overflow-x-auto border-b border-gray-800">
+            {editor.tabs.map((tab, index) => (
+              <div
+                key={index}
+                className={`flex items-center px-4 py-2 cursor-pointer border-r border-gray-800 text-sm ${index === editor.activeTabIndex ? 'bg-gray-800 text-green-400' : 'hover:bg-gray-800'}`}
+                onClick={() => setEditor(prev => ({ ...prev, activeTabIndex: index }))}
+              >
+                <span>{tab.file}</span>
+                <button
+                  className="ml-3 hover:text-red-400 focus:outline-none"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleCloseTab(index);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button 
+              className="px-4 py-2 hover:bg-gray-800 text-green-500 text-sm font-bold"
+              onClick={() => {
+                const fileName = prompt('Enter new file name:', 'Untitled');
+                if (fileName) {
+                  setEditor(prev => {
+                    const existingTabIndex = prev.tabs.findIndex(t => t.file === fileName);
+                    if (existingTabIndex >= 0) {
+                      return { ...prev, activeTabIndex: existingTabIndex };
+                    }
+                    return {
+                      ...prev,
+                      tabs: [...prev.tabs, { file: fileName, content: vfs[fileName]?.content || '', mode: 'edit' }],
+                      activeTabIndex: prev.tabs.length
+                    };
+                  });
+                }
+              }}
+            >
+              + New Tab
+            </button>
+          </div>
+
+          {/* Toolbar */}
+          <div className="flex justify-between items-center p-2 text-green-400 border-b border-green-800 bg-black">
+            <span className="font-bold text-sm">
+              📝 Editing: {editor.tabs[editor.activeTabIndex]?.file} 
+              <span className="text-xs opacity-50 uppercase ml-2">[{editor.tabs[editor.activeTabIndex]?.mode}]</span>
+            </span>
+            <div className="flex gap-4 text-sm items-center">
+              {editor.tabs[editor.activeTabIndex] && (editor.tabs[editor.activeTabIndex].file.endsWith('.md') || editor.tabs[editor.activeTabIndex].file.endsWith('.txt')) && (
+                <button 
+                  onClick={() => setShowPreview(!showPreview)}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold uppercase tracking-tighter transition-all hover:scale-105 active:scale-95 ${
+                    showPreview 
+                      ? 'bg-blue-900/40 text-blue-400 border border-blue-800 hover:bg-blue-900/60' 
+                      : 'bg-green-900/30 text-green-400 border border-green-800 hover:bg-green-900/50'
+                  }`}
+                  title="Toggle Preview"
+                >
+                  {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
+                  {showPreview ? 'Hide Preview' : 'Show Preview'}
+                </button>
+              )}
+              <button 
+                onClick={() => {
+                  const activeTab = editor.tabs[editor.activeTabIndex];
+                  if (activeTab) {
+                    setVfs(prev => ({ ...prev, [activeTab.file]: { content: activeTab.content, createdAt: prev[activeTab.file]?.createdAt || new Date().toISOString() } }));
+                    appendToHistory({ type: 'text', content: `Saved ${activeTab.file}` });
+                  }
+                }}
+                className="hover:text-white transition-colors"
+              >
+                [Ctrl+S] Save
+              </button>
+              <button 
+                onClick={handleCloseEditor}
+                className="hover:text-red-400 transition-colors"
+              >
+                [Esc] Close Editor
+              </button>
+            </div>
+          </div>
+
+          {/* Editor Area */}
+          <div className="flex-1 overflow-hidden flex bg-transparent">
+            {editor.tabs.length > 0 && (
+              <>
+                <div className={`flex-1 overflow-y-auto p-4 ${showPreview && (editor.tabs[editor.activeTabIndex].file.endsWith('.md') || editor.tabs[editor.activeTabIndex].file.endsWith('.txt')) ? 'border-r border-gray-800' : ''}`}>
+                  <Editor
+                    value={editor.tabs[editor.activeTabIndex].content}
+                    onValueChange={code => setEditor(prev => {
+                      const newTabs = [...prev.tabs];
+                      newTabs[prev.activeTabIndex].content = code;
+                      return { ...prev, tabs: newTabs };
+                    })}
+                    highlight={code => {
+                      const file = editor.tabs[editor.activeTabIndex].file;
+                      let lang = languages.plain;
+                      let langName = 'plain';
+                      
+                      if (file.endsWith('.js') || file.endsWith('.jsx') || file.endsWith('.ts') || file.endsWith('.tsx')) {
+                        lang = languages.js; langName = 'javascript';
+                      } else if (file.endsWith('.css')) {
+                        lang = languages.css; langName = 'css';
+                      } else if (file.endsWith('.html')) {
+                        lang = languages.html; langName = 'html';
+                      } else if (file.endsWith('.json')) {
+                        lang = languages.json; langName = 'json';
+                      } else if (file.endsWith('.md')) {
+                        lang = languages.markdown; langName = 'markdown';
+                      } else if (file.endsWith('.py')) {
+                        lang = languages.python; langName = 'python';
+                      } else if (file.endsWith('.sh')) {
+                        lang = languages.bash; langName = 'bash';
+                      }
+                      
+                      return highlight(code, lang || languages.plain, langName);
+                    }}
+                    padding={10}
+                    className="font-mono text-sm sm:text-base leading-relaxed text-green-300 min-h-full"
+                    style={{
+                      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+                      outline: 'none',
+                    }}
+                    textareaClassName="outline-none"
+                    onKeyDown={e => {
+                      if (e.ctrlKey && e.key === 's') {
+                        e.preventDefault();
+                        const activeTab = editor.tabs[editor.activeTabIndex];
+                        if (activeTab) {
+                          setVfs(prev => ({ ...prev, [activeTab.file]: { content: activeTab.content, createdAt: prev[activeTab.file]?.createdAt || new Date().toISOString() } }));
+                          appendToHistory({ type: 'text', content: `Saved ${activeTab.file}` });
+                        }
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        handleCloseEditor();
+                      }
+                    }}
+                    autoFocus
+                  />
+                </div>
+                {showPreview && (editor.tabs[editor.activeTabIndex].file.endsWith('.md') || editor.tabs[editor.activeTabIndex].file.endsWith('.txt')) && (
+                  <div className="flex-1 overflow-y-auto p-6 bg-gray-900/80 text-gray-300 font-sans">
+                    {editor.tabs[editor.activeTabIndex].file.endsWith('.md') ? (
+                      <div className="prose prose-invert max-w-none prose-pre:bg-black prose-pre:border prose-pre:border-gray-800">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {editor.tabs[editor.activeTabIndex].content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <pre className="whitespace-pre-wrap font-mono text-sm">
+                        {editor.tabs[editor.activeTabIndex].content}
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Close Confirmation Modal */}
+          {closeConfirm.isOpen && (
+            <div className="fixed inset-0 z-[200] bg-black/80 flex items-center justify-center p-4">
+              <div className="bg-gray-900 border border-gray-700 p-6 max-w-md w-full shadow-2xl">
+                <h3 className="text-xl font-bold text-white mb-4">Unsaved Changes</h3>
+                <p className="text-gray-300 mb-6">
+                  {closeConfirm.type === 'single' 
+                    ? `Save changes to "${editor.tabs[closeConfirm.tabIndex!]?.file}" before closing?` 
+                    : "You have unsaved changes in one or more tabs. Save all before closing?"}
+                </p>
+                <div className="flex justify-end gap-4">
+                  <button 
+                    className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                    onClick={() => setCloseConfirm({ isOpen: false, type: 'all' })}
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    className="px-4 py-2 bg-red-900/50 text-red-400 hover:bg-red-900 hover:text-red-300 transition-colors border border-red-800"
+                    onClick={() => handleConfirmClose(false)}
+                  >
+                    Don't Save
+                  </button>
+                  <button 
+                    className="px-4 py-2 bg-green-900/50 text-green-400 hover:bg-green-900 hover:text-green-300 transition-colors border border-green-800"
+                    onClick={() => handleConfirmClose(true)}
+                  >
+                    {closeConfirm.type === 'single' ? 'Save' : 'Save All'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Status Bar */}
       <div className={`fixed bottom-0 left-0 right-0 h-6 flex items-center px-4 text-[10px] sm:text-xs font-bold uppercase tracking-wider z-50 transition-colors duration-300 ${

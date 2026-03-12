@@ -1,5 +1,5 @@
 {
   "name": "Web Terminal",
-  "description": "A retro terminal interface to browse and fetch websites.",
+  "description": "A retro terminal interface with tabs, virtual file system, GitHub integration, and web browsing capabilities.",
   "requestFramePermissions": ["camera", "microphone", "geolocation"]
 }
