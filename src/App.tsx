@@ -25,7 +25,7 @@ type HistoryItem = {
   url?: string;
 };
 
-type Theme = 'dark' | 'light';
+type Theme = 'light' | 'dark';
 
 const HELP_TEXT = `Available commands:
   help          - Show this help message
@@ -177,7 +177,8 @@ export default function App() {
   const completionIndex = activeTab.completionIndex;
   const setCompletionIndex = (val: number | ((prev: number) => number)) => updateTab(prev => ({ completionIndex: typeof val === 'function' ? val(prev.completionIndex) : val }));
 
-  const [theme, setTheme] = useState<Theme>('dark');
+  const [theme, setTheme] = useState<Theme>('light');
+  const [pendingAction, setPendingAction] = useState<{ action: () => void; message: string } | null>(null);
   const [customCSS, setCustomCSS] = useState<string>('');
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [activeProcesses, setActiveProcesses] = useState<string[]>([]);
@@ -187,10 +188,10 @@ export default function App() {
   const [ollamaHost, setOllamaHost] = useState('http://localhost:11434');
   
   // Virtual File System & Editor
-  type VFSEntry = { content: string; createdAt: string; isDir?: boolean };
+  type VFSEntry = { content: string; createdAt: string; isDir?: boolean; permissions?: string };
   const [vfs, setVfs] = useState<Record<string, VFSEntry>>({
-    'hello.js': { content: 'console.log("Hello from WebTerm OS!");\n// Try running this with: run hello.js', createdAt: new Date().toISOString() },
-    'readme.txt': { content: 'Welcome to the Virtual File System.\nUse ls, touch, cat, rm, edit, and run.', createdAt: new Date().toISOString() }
+    'hello.js': { content: 'console.log("Hello from WebTerm OS!");\n// Try running this with: run hello.js', createdAt: new Date().toISOString(), permissions: 'rw-r--r--' },
+    'readme.txt': { content: 'Welcome to the Virtual File System.\nUse ls, touch, cat, rm, edit, and run.', createdAt: new Date().toISOString(), permissions: 'rw-r--r--' }
   });
   const [editor, setEditor] = useState<{
     isOpen: boolean;
@@ -228,16 +229,18 @@ export default function App() {
       // Alt+T for new tab
       if (e.altKey && e.key.toLowerCase() === 't') {
         e.preventDefault();
-        setTabs(prev => [...prev, createNewTab()]);
-        setActiveTabIndex(tabs.length);
+        const newTab = createNewTab();
+        setTabs(prev => [...prev, newTab]);
+        setActiveTabIndex(prev => prev + 1);
       }
       // Alt+W for close tab
       else if (e.altKey && e.key.toLowerCase() === 'w') {
         e.preventDefault();
-        if (tabs.length > 1) {
-          setTabs(prev => prev.filter((_, i) => i !== activeTabIndex));
-          setActiveTabIndex(prev => Math.max(0, prev === tabs.length - 1 ? prev - 1 : prev));
-        }
+        setTabs(prev => {
+          if (prev.length <= 1) return prev;
+          setActiveTabIndex(active => Math.max(0, active === prev.length - 1 ? active - 1 : active));
+          return prev.filter((_, i) => i !== activeTabIndex);
+        });
       }
       // Alt+Left/Right to switch tabs
       else if (e.altKey && e.key === 'ArrowLeft') {
@@ -338,6 +341,19 @@ export default function App() {
     // 2. Echo the command to the screen
     appendToHistory({ type: 'command', content: trimmed });
     setInput('');
+
+    if (pendingAction) {
+      if (trimmed.toLowerCase() === 'y') {
+        pendingAction.action();
+        setPendingAction(null);
+      } else if (trimmed.toLowerCase() === 'n') {
+        appendToHistory({ type: 'text', content: 'Operation cancelled.' });
+        setPendingAction(null);
+      } else {
+        appendToHistory({ type: 'text', content: 'Invalid input. Please type "y" or "n".' });
+      }
+      return;
+    }
 
     // 3. Parse the command
     const parts = trimmed.split(/\s+/);
@@ -487,7 +503,12 @@ export default function App() {
           break;
         }
         if (!vfs[file]) {
-          setVfs(prev => ({ ...prev, [file]: { content: '', createdAt: new Date().toISOString() } }));
+          setVfs(prev => ({ ...prev, [file]: { content: '', createdAt: new Date().toISOString(), permissions: 'rw-r--r--' } }));
+        } else if (vfs[file].isDir) {
+          appendToHistory({ type: 'error', content: `touch: cannot touch '${file}': Is a directory` });
+        } else {
+          // Update timestamp
+          setVfs(prev => ({ ...prev, [file]: { ...prev[file], createdAt: new Date().toISOString() } }));
         }
         break;
       }
@@ -499,9 +520,9 @@ export default function App() {
           break;
         }
         if (!vfs[dir]) {
-          setVfs(prev => ({ ...prev, [dir]: { content: '', createdAt: new Date().toISOString(), isDir: true } }));
+          setVfs(prev => ({ ...prev, [dir]: { content: '', createdAt: new Date().toISOString(), isDir: true, permissions: 'rwxr-xr-x' } }));
         } else {
-          appendToHistory({ type: 'error', content: `mkdir: ${dir}: File exists` });
+          appendToHistory({ type: 'error', content: `mkdir: cannot create directory '${dir}': File exists` });
         }
         break;
       }
@@ -513,9 +534,13 @@ export default function App() {
           break;
         }
         if (vfs[file] !== undefined) {
-          appendToHistory({ type: 'text', content: vfs[file].content });
+          if (vfs[file].isDir) {
+            appendToHistory({ type: 'error', content: `cat: '${file}': Is a directory` });
+          } else {
+            appendToHistory({ type: 'text', content: vfs[file].content });
+          }
         } else {
-          appendToHistory({ type: 'error', content: `cat: ${file}: No such file` });
+          appendToHistory({ type: 'error', content: `cat: '${file}': No such file or directory` });
         }
         break;
       }
@@ -527,14 +552,18 @@ export default function App() {
           break;
         }
         if (vfs[file] !== undefined) {
-          setVfs(prev => {
-            const newVfs = { ...prev };
-            delete newVfs[file];
-            return newVfs;
-          });
-          appendToHistory({ type: 'text', content: `Removed ${file}` });
+          if (vfs[file].isDir) {
+            appendToHistory({ type: 'error', content: `rm: cannot remove '${file}': Is a directory` });
+          } else {
+            setVfs(prev => {
+              const newVfs = { ...prev };
+              delete newVfs[file];
+              return newVfs;
+            });
+            appendToHistory({ type: 'text', content: `Removed '${file}'` });
+          }
         } else {
-          appendToHistory({ type: 'error', content: `rm: ${file}: No such file` });
+          appendToHistory({ type: 'error', content: `rm: cannot remove '${file}': No such file or directory` });
         }
         break;
       }
@@ -566,29 +595,35 @@ export default function App() {
           break;
         }
         if (vfs[file] !== undefined) {
-          try {
-            // Capture console.log output
-            let output = '';
-            const originalLog = console.log;
-            console.log = (...logArgs) => {
-              output += logArgs.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n';
-            };
-            
-            // Execute the code
-            // eslint-disable-next-line no-eval
-            const result = eval(vfs[file].content);
-            console.log = originalLog;
-            
-            if (output) {
-              appendToHistory({ type: 'text', content: output.trim() });
-            } else if (result !== undefined) {
-              appendToHistory({ type: 'text', content: String(result) });
-            } else {
-              appendToHistory({ type: 'text', content: '[Execution finished with no output]' });
-            }
-          } catch (e: any) {
-            appendToHistory({ type: 'error', content: `Execution Error: ${e.message}` });
-          }
+          setPendingAction({
+            action: () => {
+              try {
+                // Capture console.log output
+                let output = '';
+                const originalLog = console.log;
+                console.log = (...logArgs) => {
+                  output += logArgs.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n';
+                };
+                
+                // Execute the code
+                // eslint-disable-next-line no-eval
+                const result = eval(vfs[file].content);
+                console.log = originalLog;
+                
+                if (output) {
+                  appendToHistory({ type: 'text', content: output.trim() });
+                } else if (result !== undefined) {
+                  appendToHistory({ type: 'text', content: String(result) });
+                } else {
+                  appendToHistory({ type: 'text', content: '[Execution finished with no output]' });
+                }
+              } catch (e: any) {
+                appendToHistory({ type: 'error', content: `Execution Error: ${e.message}` });
+              }
+            },
+            message: `Are you sure you want to run ${file}? (y/n)`
+          });
+          appendToHistory({ type: 'text', content: `Are you sure you want to run ${file}? (y/n)` });
         } else {
           appendToHistory({ type: 'error', content: `run: ${file}: No such file` });
         }
@@ -612,6 +647,47 @@ export default function App() {
             `${name} (${entry.isDir ? 'DIR' : 'FILE'})`
           ).join('\n');
           appendToHistory({ type: 'text', content: `Found ${matches.length} match(es):\n${result}` });
+        }
+        break;
+      }
+
+      case 'github': {
+        const username = args[0];
+        if (!username) {
+          appendToHistory({ type: 'error', content: 'Usage: github <username>' });
+          break;
+        }
+        
+        appendToHistory({ type: 'text', content: `Fetching profile for ${username}...` });
+        
+        try {
+          const [userRes, reposRes] = await Promise.all([
+            fetch(`https://api.github.com/users/${username}`),
+            fetch(`https://api.github.com/users/${username}/repos?sort=updated&per_page=5`)
+          ]);
+          
+          if (!userRes.ok) throw new Error(`User not found: ${userRes.status}`);
+          if (!reposRes.ok) throw new Error(`Could not fetch repositories: ${reposRes.status}`);
+          
+          const user = await userRes.json();
+          const repos = await reposRes.json();
+          
+          let output = `--- GitHub Profile: ${user.login} ---\n`;
+          output += `Bio: ${user.bio || 'N/A'}\n`;
+          output += `Followers: ${user.followers}\n`;
+          output += `Public Repos: ${user.public_repos}\n\n`;
+          output += `Recent Repositories:\n`;
+          
+          if (repos.length === 0) {
+            output += 'No public repositories found.';
+          } else {
+            output += repos.map((r: any) => `- ${r.name} (${r.stargazers_count} stars)`).join('\n');
+          }
+          
+          appendToHistory({ type: 'text', content: output });
+          
+        } catch (e: any) {
+          appendToHistory({ type: 'error', content: `GitHub Error: ${e.message}` });
         }
         break;
       }
